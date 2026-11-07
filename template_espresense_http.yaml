@@ -1,0 +1,233 @@
+zabbix_export:
+  version: '8.0'
+  templates:
+    - uuid: 'fa11bac0def040008000000000000001'
+      template: 'ESPResense by HTTP'
+      name: 'ESPResense by HTTP'
+      description: |
+        Monitors an ESPresense node via its built-in REST API.
+
+        **Endpoints**
+        - `/json` – room, firmware version (`ver`), firmware flavour (`firm`), board
+        - `/json/devices` – tracked BLE devices (distance, RSSI)
+      groups:
+        - name: 'Templates/Network devices'
+      macros:
+        - macro: '{$ESPRESENSE.PORT}'
+          value: '80'
+          description: 'HTTP port of the ESPresense node'
+        - macro: '{$ESPRESENSE.INTERVAL}'
+          value: '1m'
+          description: 'Polling interval for HTTP items'
+      items:
+        - uuid: 'fa11bac0def040008000000000000002'
+          name: 'Node info – raw'
+          type: HTTP_AGENT
+          key: 'espresense.node.info'
+          delay: '{$ESPRESENSE.INTERVAL}'
+          url: 'http://{HOST.CONN}:{$ESPRESENSE.PORT}/json'
+          request_method: GET
+          retrieve_mode: BODY
+          output_format: RAW
+          value_type: TEXT
+          description: 'Full JSON response from /json'
+          tags:
+            - tag: component
+              value: node
+          triggers:
+            - uuid: 'fa11bac0def040008000000000000003'
+              name: 'ESPResense node is unreachable (HTTP)'
+              expression: 'nodata(/ESPResense by HTTP/espresense.node.info,5m)=1'
+              priority: WARNING
+              description: 'No HTTP response from /json for 5 minutes.'
+              tags:
+                - tag: scope
+                  value: availability
+
+        - uuid: 'fa11bac0def040008000000000000004'
+          name: 'Devices – raw'
+          type: HTTP_AGENT
+          key: 'espresense.devices.raw'
+          delay: '{$ESPRESENSE.INTERVAL}'
+          url: 'http://{HOST.CONN}:{$ESPRESENSE.PORT}/json/devices'
+          request_method: GET
+          retrieve_mode: BODY
+          output_format: RAW
+          value_type: TEXT
+          description: 'Full JSON object from /json/devices'
+          tags:
+            - tag: component
+              value: devices
+
+        - uuid: 'fa11bac0def040008000000000000005'
+          name: 'Room name'
+          type: DEPENDENT
+          key: 'espresense.node.room'
+          master_item:
+            key: 'espresense.node.info'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.room'
+              error_handler: DISCARD_VALUE
+          tags:
+            - tag: component
+              value: node
+
+        - uuid: 'fa11bac0def040008000000000000006'
+          name: 'Firmware version'
+          type: DEPENDENT
+          key: 'espresense.node.version'
+          master_item:
+            key: 'espresense.node.info'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.ver'
+              error_handler: DISCARD_VALUE
+          tags:
+            - tag: component
+              value: node
+
+        - uuid: 'fa11bac0def040008000000000000007'
+          name: 'Firmware flavour'
+          type: DEPENDENT
+          key: 'espresense.node.firm'
+          master_item:
+            key: 'espresense.node.info'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.firm'
+              error_handler: DISCARD_VALUE
+          tags:
+            - tag: component
+              value: node
+
+        - uuid: 'fa11bac0def040008000000000000008'
+          name: 'Board variant'
+          type: DEPENDENT
+          key: 'espresense.node.board'
+          master_item:
+            key: 'espresense.node.info'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.board'
+              error_handler: DISCARD_VALUE
+          tags:
+            - tag: component
+              value: node
+
+        - uuid: 'fa11bac0def040008000000000000009'
+          name: 'Total tracked devices'
+          type: DEPENDENT
+          key: 'espresense.devices.total'
+          master_item:
+            key: 'espresense.devices.raw'
+          value_type: FLOAT
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var data = JSON.parse(value);
+                  return (data.devices && data.devices.length) ? data.devices.length : 0;
+          units: 'devices'
+          tags:
+            - tag: component
+              value: devices
+          triggers:
+            - uuid: 'fa11bac0def04000800000000000000a'
+              name: 'No BLE devices are being tracked'
+              expression: 'last(/ESPResense by HTTP/espresense.devices.total)=0'
+              priority: WARNING
+              description: 'Node online but reports zero tracked devices.'
+              tags:
+                - tag: scope
+                  value: functionality
+
+      discovery_rules:
+        - uuid: 'fa11bac0def04000800000000000000b'
+          name: 'BLE device discovery'
+          type: DEPENDENT
+          key: 'espresense.devices.discovery'
+          master_item:
+            key: 'espresense.devices.raw'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var data = JSON.parse(value);
+                  var devices = data.devices || [];
+                  var result = [];
+                  for (var i = 0; i < devices.length; i++) {
+                    var d = devices[i];
+                    result.push({
+                      '{#DEVICE_ID}': d.id,
+                      '{#DEVICE_NAME}': d.name || d.id,
+                      '{#DEVICE_MAC}': d.mac || 'unknown'
+                    });
+                  }
+                  return JSON.stringify(result);
+          item_prototypes:
+            - uuid: 'fa11bac0def04000800000000000000c'
+              name: 'Distance – {#DEVICE_NAME} ({#DEVICE_ID})'
+              type: DEPENDENT
+              key: 'espresense.device.distance[{#DEVICE_ID}]'
+              master_item:
+                key: 'espresense.devices.raw'
+              value_type: FLOAT
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var data = JSON.parse(value);
+                      var devices = data.devices || [];
+                      var id = '{#DEVICE_ID}';
+                      for (var i = 0; i < devices.length; i++) {
+                        if (devices[i].id === id) {
+                          if (devices[i].distance === undefined) { throw 'distance missing'; }
+                          return devices[i].distance;
+                        }
+                      }
+                      throw 'device not found';
+                  error_handler: DISCARD_VALUE
+              units: 'm'
+              tags:
+                - tag: component
+                  value: device
+                - tag: device_id
+                  value: '{#DEVICE_ID}'
+
+            - uuid: 'fa11bac0def04000800000000000000d'
+              name: 'RSSI – {#DEVICE_NAME} ({#DEVICE_ID})'
+              type: DEPENDENT
+              key: 'espresense.device.rssi[{#DEVICE_ID}]'
+              master_item:
+                key: 'espresense.devices.raw'
+              value_type: FLOAT
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var data = JSON.parse(value);
+                      var devices = data.devices || [];
+                      var id = '{#DEVICE_ID}';
+                      for (var i = 0; i < devices.length; i++) {
+                        if (devices[i].id === id) {
+                          if (devices[i].rssi === undefined) { throw 'rssi missing'; }
+                          return devices[i].rssi;
+                        }
+                      }
+                      throw 'device not found';
+                  error_handler: DISCARD_VALUE
+              units: 'dBm'
+              tags:
+                - tag: component
+                  value: device
+                - tag: device_id
+                  value: '{#DEVICE_ID}'
