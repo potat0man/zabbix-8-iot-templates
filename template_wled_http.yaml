@@ -1,0 +1,1524 @@
+zabbix_export:
+  version: '8.0'
+  template_groups:
+    - uuid: b4ac72ca2a2d49d8aa04209f744bb15a
+      name: Templates/Applications
+  templates:
+    - uuid: 7505c01db20943eb9e3b62d5c735a1d2
+      template: 'WLED by HTTP'
+      name: 'WLED by HTTP'
+      description: |
+        Monitors a WLED LED controller (ESP8266 / ESP32) through its built-in JSON API, using the Zabbix HTTP agent only. No external scripts, no Zabbix agent on the device.
+
+        One request per polling interval fetches the whole device state ('/json'), and every metric is extracted from it with dependent items.
+
+        Setup:
+        1. Create a host for the WLED device, set its interface (IP or DNS), and link this template.
+        2. The template uses {HOST.CONN} (the host interface address) automatically. No host macro is needed for the address.
+        3. Optionally adjust '{$WLED.SCHEME}', '{$WLED.PORT}' and '{$WLED.API.PATH}'.
+        4. For power estimation, enable "Automatic Brightness Limiter" in WLED (Config > LED Preferences) and set '{$WLED.LED.VOLTAGE}' to your LED supply voltage.
+
+        Built for the WLED JSON API of WLED 0.14 and later. Fields missing on older firmware are skipped.
+      wizard_ready: 'YES'
+      readme: |
+        ## Overview
+
+        This template monitors a [WLED](https://kno.wled.ge/) LED controller through its [JSON API](https://kno.wled.ge/interfaces/json-api/) using the Zabbix HTTP agent. It works without any external scripts and without a Zabbix agent on the device.
+
+        A single HTTP request per polling interval fetches the full device document (`/json`: state, info, effect names and palette names). All metrics are extracted from that response with dependent items, so the controller is queried only once per interval.
+
+        Collected data:
+
+        - Device: name, firmware version and build, platform, SDK, MAC and IP address, uptime, CPU frequency, flash size
+        - Resources: free heap memory, filesystem usage
+        - Wi-Fi: RSSI, signal quality, channel, BSSID
+        - LEDs: LED count, frame rate, estimated current and power, ABL limit and utilization
+        - State: on/off, brightness, preset, playlist, transition, main segment effect and palette, nightlight, UDP sync, realtime (live) mode
+        - Segments (low-level discovery): state, brightness, length, effect, palette, primary color
+
+        ## Setup
+
+        1. Make sure the Zabbix server or proxy can reach the WLED device over HTTP (default port 80).
+        2. Create a host, set its interface to the WLED device IP or DNS name, and link this template.
+           The template uses `{HOST.CONN}` (the host interface address) automatically — no extra host macro is needed for the address.
+        3. Optionally change `{$WLED.SCHEME}`, `{$WLED.PORT}` and `{$WLED.API.PATH}`. Use `json/si` on heavily loaded ESP8266 devices to get a smaller response; effect and palette items then show numeric IDs instead of names.
+        4. For current and power values, enable the Automatic Brightness Limiter (ABL) in WLED (Config > LED Preferences). Without ABL, WLED reports 0 mA. Set `{$WLED.LED.VOLTAGE}` to the LED supply voltage to get the power estimate in watts.
+
+        ## Macros used
+
+        |Name|Description|Default|
+        |----|-----------|-------|
+        |{$WLED.SCHEME}|Request scheme: `http` or `https`.|`http`|
+        |{$WLED.PORT}|HTTP port of the WLED web server.|`80`|
+        |{$WLED.API.PATH}|JSON API path: `json` (full) or `json/si` (state and info only).|`json`|
+        |{$WLED.DATA.INTERVAL}|Polling interval of the master item.|`1m`|
+        |{$WLED.TIMEOUT}|HTTP request timeout.|`5s`|
+        |{$WLED.NODATA.TIMEOUT}|Time without data after which the device is considered unreachable.|`5m`|
+        |{$WLED.LED.VOLTAGE}|LED supply voltage, used to estimate power from current.|`5`|
+        |{$WLED.MEMORY.FREE.MIN.WARN}|Free heap threshold. WLED becomes unstable below about 10 KB.|`10K`|
+        |{$WLED.WIFI.RSSI.MIN.WARN}|Minimum acceptable Wi-Fi RSSI in dBm.|`-80`|
+        |{$WLED.FS.PUSED.MAX.WARN}|Maximum filesystem utilization in %.|`90`|
+        |{$WLED.ABL.PUSED.MAX.WARN}|LED current as % of the ABL budget at which brightness is considered limited.|`95`|
+      vendor:
+        name: Community
+        version: 8.0-2
+      groups:
+        - name: Templates/Applications
+      items:
+        - uuid: fa1fb5f914024b84b24cc6845014b41f
+          name: 'Get data'
+          type: HTTP_AGENT
+          key: wled.get
+          delay: '{$WLED.DATA.INTERVAL}'
+          history: 1h
+          value_type: TEXT
+          timeout: '{$WLED.TIMEOUT}'
+          description: 'Raw JSON document returned by the WLED JSON API. All other items are dependent on this one.'
+          url: '{$WLED.SCHEME}://{HOST.CONN}:{$WLED.PORT}/{$WLED.API.PATH}'
+          headers:
+            - name: Accept
+              value: application/json
+          preprocessing:
+            - type: CHECK_JSON_ERROR
+              parameters:
+                - $.error
+          tags:
+            - tag: component
+              value: raw
+          triggers:
+            - uuid: 10677e6cd95e462192bf7826476c4d7f
+              expression: 'nodata(/WLED by HTTP/wled.get,{$WLED.NODATA.TIMEOUT})=1'
+              name: 'WLED: Failed to fetch data from device'
+              event_name: 'WLED: Failed to fetch data from device (or no data for {$WLED.NODATA.TIMEOUT})'
+              priority: AVERAGE
+              description: 'Zabbix has not received data from the WLED JSON API for {$WLED.NODATA.TIMEOUT}. The device may be powered off, disconnected from Wi-Fi, or unreachable from the Zabbix server or proxy.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: d628ce459f294145bd4172749f361a94
+          name: 'CPU frequency'
+          type: DEPENDENT
+          key: wled.cpu.frequency
+          units: Hz
+          description: 'CPU clock frequency of the microcontroller. Not reported by older firmware.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.clock
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '1000000'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 614af633c8d14769a2ce83b6788035f3
+          name: 'Flash size'
+          type: DEPENDENT
+          key: wled.flash.size
+          units: B
+          description: 'Size of the flash chip. Not reported by older firmware.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.flash
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '1048576'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: storage
+        - uuid: c16a20dd094c4de09aed3632a515cef5
+          name: 'Filesystem: Used, in %'
+          type: DEPENDENT
+          key: wled.fs.pused
+          value_type: FLOAT
+          units: '%'
+          description: 'Filesystem (LittleFS) utilization: configuration, presets, palettes and ledmaps.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.fs
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var fs = JSON.parse(value);
+                  return (fs.t > 0) ? fs.u * 100 / fs.t : 0;
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: storage
+          triggers:
+            - uuid: dd4db43cdf984bd68df2ae4de0db8001
+              expression: 'min(/WLED by HTTP/wled.fs.pused,5m)>{$WLED.FS.PUSED.MAX.WARN}'
+              name: 'WLED: Filesystem usage is high'
+              event_name: 'WLED: Filesystem usage is high (over {$WLED.FS.PUSED.MAX.WARN}% for 5m)'
+              opdata: 'Used: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'The WLED filesystem is almost full. Saving presets, palettes or configuration may fail.'
+              dependencies:
+                - name: 'WLED: Failed to fetch data from device'
+                  expression: 'nodata(/WLED by HTTP/wled.get,{$WLED.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: 99a6fba7898248f588afa0d81a91df56
+          name: 'Filesystem: Total space'
+          type: DEPENDENT
+          key: wled.fs.total
+          units: B
+          description: 'Total size of the filesystem.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.fs.t
+            - type: MULTIPLIER
+              parameters:
+                - '1000'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: storage
+        - uuid: 3e297cdd5d214f93bfdd424d0129f6d6
+          name: 'Filesystem: Used space'
+          type: DEPENDENT
+          key: wled.fs.used
+          units: B
+          description: 'Estimated used space of the filesystem.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.fs.u
+            - type: MULTIPLIER
+              parameters:
+                - '1000'
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: storage
+        - uuid: 54c3fa6a191f49deaac12af495c012f9
+          name: 'Platform'
+          type: DEPENDENT
+          key: wled.info.arch
+          value_type: CHAR
+          description: 'Microcontroller platform, for example esp8266, esp32, ESP32-S3, ESP32-C3.'
+          inventory_link: HARDWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.arch
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: e687196656ba44f48e4e1692822e894c
+          name: 'Firmware build'
+          type: DEPENDENT
+          key: wled.info.build
+          description: 'Firmware build ID in YYMMDDB format.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.vid
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 6e97b3ae3ac54fb298964962b798b7c3
+          name: 'SDK version'
+          type: DEPENDENT
+          key: wled.info.core
+          value_type: CHAR
+          description: 'Version of the Arduino core / ESP-IDF SDK the firmware was built with.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.core
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: b554a40e534746bb83f3c6c5e11b18dc
+          name: 'IP address'
+          type: DEPENDENT
+          key: wled.info.ip
+          value_type: CHAR
+          description: 'IP address of the device. Empty if not connected.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.ip
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: network
+        - uuid: 1f1c3912f9084be598394bc215f4bc24
+          name: 'MAC address'
+          type: DEPENDENT
+          key: wled.info.mac
+          value_type: CHAR
+          description: 'MAC address of the Wi-Fi interface.'
+          inventory_link: MACADDRESS_A
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.mac
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var parts = String(value).match(/.{1,2}/g);
+                  return parts ? parts.join(':') : value;
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: network
+        - uuid: d25d13b0fced42ec85ae28577c5f8a0e
+          name: 'Device name'
+          type: DEPENDENT
+          key: wled.info.name
+          value_type: CHAR
+          description: 'Friendly name configured in WLED (Config > User Interface).'
+          inventory_link: NAME
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.name
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 0482ec5a7f1a48eeb9c6e9d94f889c3f
+          name: 'Firmware version'
+          type: DEPENDENT
+          key: wled.info.version
+          value_type: CHAR
+          description: 'WLED firmware version.'
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.ver
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: 952e85edd0174b8eb8a2800243e1dff0
+              expression: 'last(/WLED by HTTP/wled.info.version,#1)<>last(/WLED by HTTP/wled.info.version,#2) and length(last(/WLED by HTTP/wled.info.version))>0'
+              name: 'WLED: Firmware version has changed'
+              event_name: 'WLED: Firmware version has changed (new version: {ITEM.VALUE})'
+              priority: INFO
+              description: 'The WLED firmware version has changed. Acknowledge to close the problem manually.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: e554fd9d58ca4bd9ac6b3e3e244b99e6
+          name: 'LEDs: Current'
+          type: DEPENDENT
+          key: wled.leds.current
+          value_type: FLOAT
+          units: A
+          description: 'Estimated current drawn by the LEDs. WLED reports 0 if the Automatic Brightness Limiter (ABL) is disabled.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.leds.pwr
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: leds
+            - tag: component
+              value: power
+        - uuid: 9dc6f0dd23f941dab3871bd7d2d65406
+          name: 'LEDs: Current limit'
+          type: DEPENDENT
+          key: wled.leds.current.max
+          value_type: FLOAT
+          units: A
+          description: 'Current budget configured in the Automatic Brightness Limiter (ABL). 0 if ABL is disabled.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.leds.maxpwr
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: leds
+            - tag: component
+              value: power
+        - uuid: f012b49d3bd14ae1b746d229d9360a90
+          name: 'LEDs: Current, in % of limit'
+          type: DEPENDENT
+          key: wled.leds.current.pused
+          value_type: FLOAT
+          units: '%'
+          description: 'Estimated LED current as a percentage of the ABL budget. At about 100% WLED reduces brightness to stay within the budget. 0 if ABL is disabled.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.leds
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var leds = JSON.parse(value);
+                  return (leds.maxpwr > 0) ? leds.pwr * 100 / leds.maxpwr : 0;
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: leds
+            - tag: component
+              value: power
+          triggers:
+            - uuid: 8ac339806adc4ec188a7bcb6132893ed
+              expression: 'min(/WLED by HTTP/wled.leds.current.pused,5m)>={$WLED.ABL.PUSED.MAX.WARN}'
+              name: 'WLED: Brightness is being limited by ABL'
+              event_name: 'WLED: Brightness is being limited by ABL (current at {$WLED.ABL.PUSED.MAX.WARN}% or more of the budget for 5m)'
+              opdata: 'Current: {ITEM.LASTVALUE1}'
+              priority: INFO
+              description: 'The estimated LED current has stayed at the Automatic Brightness Limiter budget, so WLED is dimming the output. Consider a larger power supply budget or lower brightness.'
+              dependencies:
+                - name: 'WLED: Failed to fetch data from device'
+                  expression: 'nodata(/WLED by HTTP/wled.get,{$WLED.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: cea6b9cf3f034835a89556a25b1a25c0
+          name: 'LEDs: Count'
+          type: DEPENDENT
+          key: wled.leds.count
+          description: 'Total number of configured LEDs.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.leds.count
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: leds
+        - uuid: 95e181d16fd24aada004fed8a24495fe
+          name: 'LEDs: Frame rate'
+          type: DEPENDENT
+          key: wled.leds.fps
+          units: fps
+          description: 'Current number of frames per second rendered to the LEDs.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.leds.fps
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: leds
+        - uuid: a899347f4ad74b8b9a174a5445a25d7c
+          name: 'LEDs: Power'
+          type: DEPENDENT
+          key: wled.leds.power
+          value_type: FLOAT
+          units: W
+          description: 'Estimated LED power: reported current multiplied by {$WLED.LED.VOLTAGE}. 0 if ABL is disabled.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.leds.pwr
+            - type: JAVASCRIPT
+              parameters:
+                - 'return parseFloat(value) * parseFloat(''{$WLED.LED.VOLTAGE}'') / 1000;'
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: leds
+            - tag: component
+              value: power
+        - uuid: 4774c8cb9be74b048deb032a8455e635
+          name: 'Realtime mode'
+          type: DEPENDENT
+          key: wled.live
+          description: 'Whether the device is currently receiving realtime data (E1.31, Art-Net, DDP, UDP, Hyperion, Adalight).'
+          valuemap:
+            name: 'WLED Yes/No'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.live
+            - type: BOOL_TO_DECIMAL
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: b47d28b84c6343848d8eccc8f9d78076
+          name: 'Realtime source'
+          type: DEPENDENT
+          key: wled.live.source
+          value_type: CHAR
+          description: 'Protocol and IP address of the realtime data source, or "None".'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var info = JSON.parse(value);
+                  if (!info.live) {
+                      return 'None';
+                  }
+                  var src = info.lm ? info.lm : 'Generic';
+                  return info.lip ? src + ' from ' + info.lip : src;
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: 6a1eecfbf91047b2be0a4009206613b1
+          name: 'Memory: Free heap'
+          type: DEPENDENT
+          key: wled.memory.free
+          units: B
+          description: 'Free heap RAM. WLED may become unstable below about 10 KB.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.freeheap
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: memory
+          triggers:
+            - uuid: 0cffb638addf44ed8ac63885fc035f56
+              expression: 'max(/WLED by HTTP/wled.memory.free,5m)<{$WLED.MEMORY.FREE.MIN.WARN}'
+              name: 'WLED: Free heap memory is low'
+              event_name: 'WLED: Free heap memory is low (below {$WLED.MEMORY.FREE.MIN.WARN} for 5m)'
+              opdata: 'Free: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'Low free heap on WLED often leads to unresponsive UI, failed requests and crashes. Reduce LED count, segments, usermods or WebSocket clients.'
+              dependencies:
+                - name: 'WLED: Failed to fetch data from device'
+                  expression: 'nodata(/WLED by HTTP/wled.get,{$WLED.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: scope
+                  value: performance
+        - uuid: fcc52c6c5f124956865db7b2749c2fd4
+          name: 'Nightlight: Mode'
+          type: DEPENDENT
+          key: wled.nightlight.mode
+          description: 'Configured nightlight mode.'
+          valuemap:
+            name: 'WLED Nightlight mode'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.nl.mode
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: nightlight
+        - uuid: af9c6ee8b6934cde9b78b7c4acb13ab8
+          name: 'Nightlight: Active'
+          type: DEPENDENT
+          key: wled.nightlight.on
+          description: 'Whether the nightlight timer is active.'
+          valuemap:
+            name: 'WLED Yes/No'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.nl.on
+            - type: BOOL_TO_DECIMAL
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: nightlight
+        - uuid: e7cfc09bb2524f5a9f6ea4d960eb5066
+          name: 'Nightlight: Time remaining'
+          type: DEPENDENT
+          key: wled.nightlight.remaining
+          value_type: FLOAT
+          units: s
+          description: 'Remaining nightlight time. -1 if the nightlight is not active.'
+          valuemap:
+            name: 'WLED Nightlight remaining'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.nl.rem
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: nightlight
+        - uuid: 4089f1ac608841b18ca203d35013309d
+          name: 'Discovered WLED nodes'
+          type: DEPENDENT
+          key: wled.nodes.discovered
+          value_type: FLOAT
+          description: 'Number of other WLED devices discovered on the network. -1 if node discovery is disabled.'
+          valuemap:
+            name: 'WLED Node discovery'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.ndc
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: network
+        - uuid: 355fd65fe91a4ddea0f72e9dcfab8ff8
+          name: 'Brightness'
+          type: DEPENDENT
+          key: wled.state.brightness
+          description: 'Master brightness, 1-255. When the light is off, the last brightness is reported.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.bri
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: 2df363fd6083471fbedd3e003162393a
+          name: 'Effect'
+          type: DEPENDENT
+          key: wled.state.effect
+          value_type: CHAR
+          description: 'Name of the effect running on the main segment. Shows the numeric ID if the API path does not return effect names.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var d = JSON.parse(value),
+                      segs = (d.state && d.state.seg) ? d.state.seg : [],
+                      seg = null;
+
+                  for (var i = 0; i < segs.length; i++) {
+                      if (segs[i].id === d.state.mainseg) {
+                          seg = segs[i];
+                          break;
+                      }
+                  }
+                  if (seg === null) {
+                      if (segs.length === 0) {
+                          return 'None';
+                      }
+                      seg = segs[0];
+                  }
+
+                  var names = d.effects;
+                  return (names && seg.fx < names.length) ? names[seg.fx] : 'Effect ' + seg.fx;
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: 537e1f49ade94b62b9c0ff32bd56fdfd
+          name: 'Live data override'
+          type: DEPENDENT
+          key: wled.state.lor
+          description: 'Whether realtime data is being ignored in favour of the local state.'
+          valuemap:
+            name: 'WLED Live override'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.lor
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: f82319752cb541c881fe478f1cff9ca2
+          name: 'State'
+          type: DEPENDENT
+          key: wled.state.on
+          description: 'Whether the LED output is switched on.'
+          valuemap:
+            name: 'WLED On/Off'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.on
+            - type: BOOL_TO_DECIMAL
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: 132afbe58d63409687a90705f85433ea
+          name: 'Palette'
+          type: DEPENDENT
+          key: wled.state.palette
+          value_type: CHAR
+          description: 'Name of the color palette used on the main segment. Shows the numeric ID if the API path does not return palette names.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var d = JSON.parse(value),
+                      segs = (d.state && d.state.seg) ? d.state.seg : [],
+                      seg = null;
+
+                  for (var i = 0; i < segs.length; i++) {
+                      if (segs[i].id === d.state.mainseg) {
+                          seg = segs[i];
+                          break;
+                      }
+                  }
+                  if (seg === null) {
+                      if (segs.length === 0) {
+                          return 'None';
+                      }
+                      seg = segs[0];
+                  }
+
+                  var pal = seg.pal,
+                      names = d.palettes,
+                      info = d.info || {},
+                      um = info.umpalnames || [];
+
+                  if (!names) {
+                      return 'Palette ' + pal;
+                  }
+                  if (pal < names.length) {
+                      return names[pal];
+                  }
+                  if (255 - pal < um.length) {
+                      return um[255 - pal];
+                  }
+                  // WLED 16+ numbers custom palettes down from 200, older firmware down from 255.
+                  return 'Custom palette ' + ((typeof info.cpalmax === 'number') ? 200 - pal : 255 - pal);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: 1def84f7e1a24a349022922c34c8819b
+          name: 'Playlist'
+          type: DEPENDENT
+          key: wled.state.playlist
+          value_type: FLOAT
+          description: 'ID of the running playlist, -1 if none.'
+          valuemap:
+            name: 'WLED Preset'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.pl
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: b8c7825b875b49a4be06ab8a10249346
+          name: 'Preset'
+          type: DEPENDENT
+          key: wled.state.preset
+          value_type: FLOAT
+          description: 'ID of the active preset, -1 if none.'
+          valuemap:
+            name: 'WLED Preset'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.ps
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: e4949680bd2943c4b77f034a867ccc14
+          name: 'Segments'
+          type: DEPENDENT
+          key: wled.state.segments
+          description: 'Number of active segments.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.seg.length()
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: 1d3463b32a0546249826655a9821898d
+          name: 'Transition time'
+          type: DEPENDENT
+          key: wled.state.transition
+          value_type: FLOAT
+          units: s
+          description: 'Crossfade duration between states.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.transition
+            - type: MULTIPLIER
+              parameters:
+                - '0.1'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: state
+        - uuid: bb3a801390aa4031ad568a8e6343ed49
+          name: 'UDP sync: Receive'
+          type: DEPENDENT
+          key: wled.sync.receive
+          description: 'Whether the device accepts WLED UDP sync notifications from other devices.'
+          valuemap:
+            name: 'WLED Yes/No'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.udpn.recv
+            - type: BOOL_TO_DECIMAL
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: sync
+        - uuid: e202049fc78142aaa30c88d571037a0a
+          name: 'UDP sync: Send'
+          type: DEPENDENT
+          key: wled.sync.send
+          description: 'Whether the device broadcasts WLED UDP sync notifications on state changes.'
+          valuemap:
+            name: 'WLED Yes/No'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state.udpn.send
+            - type: BOOL_TO_DECIMAL
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: sync
+        - uuid: 494ad49f89554741a8300414a88a1a12
+          name: 'Uptime'
+          type: DEPENDENT
+          key: wled.uptime
+          units: uptime
+          description: 'Time since the device was last booted.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.uptime
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: f72b6b48ff8945678cb46541563006cc
+              expression: 'last(/WLED by HTTP/wled.uptime)<10m'
+              name: 'WLED: Device has been restarted'
+              event_name: 'WLED: Device has been restarted (uptime < 10m)'
+              priority: WARNING
+              description: 'The device uptime is less than 10 minutes. Unplanned restarts usually point to power supply problems, low memory or a firmware crash.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: faf6f6815ca74c309ff936fe65d5f9ed
+          name: 'Wi-Fi: BSSID'
+          type: DEPENDENT
+          key: wled.wifi.bssid
+          value_type: CHAR
+          description: 'BSSID (access point MAC address) the device is connected to.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.wifi.bssid
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: wifi
+        - uuid: dede4b19e7e7465b9c13313b5ddc918c
+          name: 'Wi-Fi: Channel'
+          type: DEPENDENT
+          key: wled.wifi.channel
+          description: 'Wi-Fi channel in use.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.wifi.channel
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: wifi
+        - uuid: e0489e3757a04c1ea3fe2403818969af
+          name: 'Wi-Fi: RSSI'
+          type: DEPENDENT
+          key: wled.wifi.rssi
+          value_type: FLOAT
+          units: dBm
+          description: 'Received signal strength of the Wi-Fi connection.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.wifi.rssi
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: wifi
+          triggers:
+            - uuid: 94796066f74844cc98a3d757c507138b
+              expression: 'max(/WLED by HTTP/wled.wifi.rssi,10m)<{$WLED.WIFI.RSSI.MIN.WARN}'
+              name: 'WLED: Wi-Fi signal is weak'
+              event_name: 'WLED: Wi-Fi signal is weak (below {$WLED.WIFI.RSSI.MIN.WARN} dBm for 10m)'
+              opdata: 'RSSI: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'A weak Wi-Fi signal causes laggy control, dropped sync packets and disconnects.'
+              dependencies:
+                - name: 'WLED: Failed to fetch data from device'
+                  expression: 'nodata(/WLED by HTTP/wled.get,{$WLED.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: scope
+                  value: performance
+        - uuid: 7923775d7fa64f79a1ef027b211eb085
+          name: 'Wi-Fi: Signal quality'
+          type: DEPENDENT
+          key: wled.wifi.signal
+          units: '%'
+          description: 'Relative Wi-Fi signal quality as calculated by WLED.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.wifi.signal
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: wifi
+        - uuid: dd23a24e75004bdcb158d9acdae1ce7f
+          name: 'WebSocket clients'
+          type: DEPENDENT
+          key: wled.ws.clients
+          value_type: FLOAT
+          description: 'Number of connected WebSocket clients (open web UIs and apps). -1 if WebSockets are not supported by the build.'
+          valuemap:
+            name: 'WLED WebSocket clients'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.info.ws
+          master_item:
+            key: wled.get
+          tags:
+            - tag: component
+              value: network
+      discovery_rules:
+        - uuid: f888bd916f0643ee805afc591c2b2110
+          name: 'Segment discovery'
+          type: DEPENDENT
+          key: wled.segment.discovery
+          lifetime: 1d
+          description: 'Discovers active WLED segments.'
+          item_prototypes:
+            - uuid: f655ab95e33541608c1b8811e58a535e
+              name: 'Segment [{#SEG.NAME}]: Brightness'
+              type: DEPENDENT
+              key: 'wled.segment.brightness[{#SEG.ID}]'
+              description: 'Segment brightness (opacity), 0-255.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.state.seg[?(@.id=={#SEG.ID})].bri.first()'
+              master_item:
+                key: wled.get
+              tags:
+                - tag: component
+                  value: segment
+                - tag: segment
+                  value: '{#SEG.NAME}'
+            - uuid: 088f00a0ed6b448cb058fa2a4a8fe3d4
+              name: 'Segment [{#SEG.NAME}]: Primary color'
+              type: DEPENDENT
+              key: 'wled.segment.color[{#SEG.ID}]'
+              value_type: CHAR
+              description: 'Primary color of the segment as #RRGGBB, or #RRGGBBWW for RGBW LEDs.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.state.seg[?(@.id=={#SEG.ID})].col.first()'
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var col = JSON.parse(value),
+                          c = (col && col.length) ? col[0] : null;
+
+                      if (typeof c === 'string') {
+                          return '#' + c.toUpperCase();
+                      }
+                      if (!c || !c.length) {
+                          return 'None';
+                      }
+
+                      var hex = '#';
+                      for (var i = 0; i < c.length; i++) {
+                          hex += ('0' + (c[i] & 255).toString(16)).slice(-2);
+                      }
+                      return hex.toUpperCase();
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: wled.get
+              tags:
+                - tag: component
+                  value: segment
+                - tag: segment
+                  value: '{#SEG.NAME}'
+            - uuid: d1b8d47c74644dd88afe8b2fa086cbc4
+              name: 'Segment [{#SEG.NAME}]: Effect'
+              type: DEPENDENT
+              key: 'wled.segment.effect[{#SEG.ID}]'
+              value_type: CHAR
+              description: 'Name of the effect running on the segment.'
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var d = JSON.parse(value),
+                          segs = (d.state && d.state.seg) ? d.state.seg : [],
+                          seg = null;
+
+                      for (var i = 0; i < segs.length; i++) {
+                          if (String(segs[i].id) === '{#SEG.ID}') {
+                              seg = segs[i];
+                              break;
+                          }
+                      }
+                      if (seg === null) {
+                          throw 'Segment {#SEG.ID} not found.';
+                      }
+
+                      var names = d.effects;
+                      return (names && seg.fx < names.length) ? names[seg.fx] : 'Effect ' + seg.fx;
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: wled.get
+              tags:
+                - tag: component
+                  value: segment
+                - tag: segment
+                  value: '{#SEG.NAME}'
+            - uuid: 0a4f40db40924ee78b5babdab1e9c902
+              name: 'Segment [{#SEG.NAME}]: Length'
+              type: DEPENDENT
+              key: 'wled.segment.leds[{#SEG.ID}]'
+              description: 'Number of LEDs in the segment (columns for 2D segments).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.state.seg[?(@.id=={#SEG.ID})].len.first()'
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: wled.get
+              tags:
+                - tag: component
+                  value: segment
+                - tag: segment
+                  value: '{#SEG.NAME}'
+            - uuid: b73458205a254c289169e43be7757d28
+              name: 'Segment [{#SEG.NAME}]: State'
+              type: DEPENDENT
+              key: 'wled.segment.on[{#SEG.ID}]'
+              description: 'Whether the segment is switched on.'
+              valuemap:
+                name: 'WLED On/Off'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.state.seg[?(@.id=={#SEG.ID})].on.first()'
+                - type: BOOL_TO_DECIMAL
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: wled.get
+              tags:
+                - tag: component
+                  value: segment
+                - tag: segment
+                  value: '{#SEG.NAME}'
+            - uuid: 7f851d3ebd5d4899ad09eae372dfdb9d
+              name: 'Segment [{#SEG.NAME}]: Palette'
+              type: DEPENDENT
+              key: 'wled.segment.palette[{#SEG.ID}]'
+              value_type: CHAR
+              description: 'Name of the color palette used by the segment.'
+              preprocessing:
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var d = JSON.parse(value),
+                          segs = (d.state && d.state.seg) ? d.state.seg : [],
+                          seg = null;
+
+                      for (var i = 0; i < segs.length; i++) {
+                          if (String(segs[i].id) === '{#SEG.ID}') {
+                              seg = segs[i];
+                              break;
+                          }
+                      }
+                      if (seg === null) {
+                          throw 'Segment {#SEG.ID} not found.';
+                      }
+
+                      var pal = seg.pal,
+                          names = d.palettes,
+                          info = d.info || {},
+                          um = info.umpalnames || [];
+
+                      if (!names) {
+                          return 'Palette ' + pal;
+                      }
+                      if (pal < names.length) {
+                          return names[pal];
+                      }
+                      if (255 - pal < um.length) {
+                          return um[255 - pal];
+                      }
+                      // WLED 16+ numbers custom palettes down from 200, older firmware down from 255.
+                      return 'Custom palette ' + ((typeof info.cpalmax === 'number') ? 200 - pal : 255 - pal);
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: wled.get
+              tags:
+                - tag: component
+                  value: segment
+                - tag: segment
+                  value: '{#SEG.NAME}'
+          master_item:
+            key: wled.get
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var d = JSON.parse(value),
+                      segs = (d.state && d.state.seg) ? d.state.seg : [],
+                      out = [];
+
+                  for (var i = 0; i < segs.length; i++) {
+                      var id = (typeof segs[i].id === 'number') ? segs[i].id : i;
+                      out.push({
+                          '{#SEG.ID}': String(id),
+                          '{#SEG.NAME}': (typeof segs[i].n === 'string' && segs[i].n.length > 0) ? segs[i].n : 'Segment ' + id
+                      });
+                  }
+
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+      tags:
+        - tag: class
+          value: hardware
+        - tag: target
+          value: wled
+      macros:
+        - macro: '{$WLED.ABL.PUSED.MAX.WARN}'
+          value: '95'
+          description: 'LED current, in % of the ABL budget, at which brightness is considered limited.'
+          config:
+            type: TEXT
+            priority: '12'
+            section_name: Thresholds
+            label: 'ABL utilization threshold, %'
+            description: 'LED current as a percentage of the Automatic Brightness Limiter budget. From 0 to 100.'
+            regex: '^([0-9]+|[0-9]+\.[0-9]+)$'
+        - macro: '{$WLED.API.PATH}'
+          value: json
+          description: 'JSON API path. "json" returns state, info, effect and palette names; "json/si" returns state and info only (smaller response, no effect or palette names).'
+          config:
+            type: LIST
+            priority: '4'
+            label: 'JSON API path'
+            description: 'Use "json/si" for a lighter request on busy ESP8266 devices. Effect and palette items will then show numeric IDs.'
+            required: 'YES'
+            options:
+              - value: json
+                text: 'Full (/json)'
+              - value: json/si
+                text: 'State and info only (/json/si)'
+        - macro: '{$WLED.DATA.INTERVAL}'
+          value: 1m
+          description: 'Polling interval of the "Get data" master item.'
+          config:
+            type: TEXT
+            priority: '5'
+            label: 'Polling interval'
+            description: 'Time suffixes are supported, for example 30s or 1m.'
+            required: 'YES'
+        - macro: '{$WLED.FS.PUSED.MAX.WARN}'
+          value: '90'
+          description: 'Maximum filesystem utilization, in %.'
+          config:
+            type: TEXT
+            priority: '11'
+            section_name: Thresholds
+            label: 'Maximum filesystem utilization, %'
+            description: 'From 0 to 100.'
+            regex: '^([0-9]+|[0-9]+\.[0-9]+)$'
+        - macro: '{$WLED.LED.VOLTAGE}'
+          value: '5'
+          description: 'LED supply voltage in volts. Used to estimate LED power from the reported current.'
+          config:
+            type: TEXT
+            priority: '7'
+            label: 'LED supply voltage, V'
+            description: 'Typically 5, 12 or 24.'
+            required: 'YES'
+            regex: '^([0-9]+|[0-9]+\.[0-9]+)$'
+        - macro: '{$WLED.MEMORY.FREE.MIN.WARN}'
+          value: 10K
+          description: 'Minimum free heap memory. WLED may become unstable below about 10 KB.'
+          config:
+            type: TEXT
+            priority: '9'
+            section_name: Thresholds
+            label: 'Minimum free heap'
+            description: 'In bytes. Size suffixes K and M are supported, for example 10K.'
+            regex: '^[0-9]+[KMG]?$'
+        - macro: '{$WLED.NODATA.TIMEOUT}'
+          value: 5m
+          description: 'Time without data after which the device is considered unreachable.'
+          config:
+            type: TEXT
+            priority: '8'
+            section_name: Thresholds
+            label: 'No data timeout'
+            description: 'Time suffixes are supported, for example 5m or 1h.'
+        - macro: '{$WLED.PORT}'
+          value: '80'
+          description: 'HTTP port of the WLED web server.'
+          config:
+            type: TEXT
+            priority: '3'
+            label: 'WLED port'
+            description: 'In the range from 1 to 65535 inclusive.'
+            required: 'YES'
+            regex: '^[0-9]+$'
+        - macro: '{$WLED.SCHEME}'
+          value: http
+          description: 'Request scheme: http or https.'
+          config:
+            type: LIST
+            priority: '2'
+            label: 'Request scheme'
+            description: 'WLED serves plain HTTP. Use HTTPS only behind a TLS reverse proxy.'
+            required: 'YES'
+            options:
+              - value: http
+                text: HTTP
+              - value: https
+                text: HTTPS
+        - macro: '{$WLED.TIMEOUT}'
+          value: 5s
+          description: 'HTTP request timeout.'
+          config:
+            type: TEXT
+            priority: '6'
+            label: 'Request timeout'
+            description: 'From 1s to 600s.'
+            required: 'YES'
+        - macro: '{$WLED.WIFI.RSSI.MIN.WARN}'
+          value: '-80'
+          description: 'Minimum acceptable Wi-Fi RSSI, in dBm.'
+          config:
+            type: TEXT
+            priority: '10'
+            section_name: Thresholds
+            label: 'Minimum Wi-Fi RSSI, dBm'
+            description: 'A negative number, for example -80.'
+            regex: '^-?[0-9]+$'
+      dashboards:
+        - uuid: 14ab800f5adb410184bb8224685c232b
+          name: 'WLED overview'
+          pages:
+            - widgets:
+                - type: graph
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'WLED by HTTP'
+                        name: 'WLED: LED current and power'
+                    - type: STRING
+                      name: reference
+                      value: AAAAA
+                - type: graph
+                  x: '36'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'WLED by HTTP'
+                        name: 'WLED: Frame rate'
+                    - type: STRING
+                      name: reference
+                      value: AAAAB
+                - type: graph
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'WLED by HTTP'
+                        name: 'WLED: Wi-Fi signal'
+                    - type: STRING
+                      name: reference
+                      value: AAAAC
+                - type: graph
+                  x: '36'
+                  'y': '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'WLED by HTTP'
+                        name: 'WLED: Free heap memory'
+                    - type: STRING
+                      name: reference
+                      value: AAAAD
+      valuemaps:
+        - uuid: 7db9dd0b42ac4c15ba050cebafb70287
+          name: 'WLED Live override'
+          mappings:
+            - value: '0'
+              newvalue: 'Off'
+            - value: '1'
+              newvalue: 'Until live data ends'
+            - value: '2'
+              newvalue: 'Until reboot'
+        - uuid: a0210a7e8175481cbb726f7f5ce1d078
+          name: 'WLED Nightlight mode'
+          mappings:
+            - value: '0'
+              newvalue: Instant
+            - value: '1'
+              newvalue: Fade
+            - value: '2'
+              newvalue: 'Color fade'
+            - value: '3'
+              newvalue: Sunrise
+        - uuid: 220b90f6a47a452b8190f54e42213f10
+          name: 'WLED Nightlight remaining'
+          mappings:
+            - value: '-1'
+              newvalue: Inactive
+        - uuid: 557ae62b193846a99000284399d0174c
+          name: 'WLED Node discovery'
+          mappings:
+            - value: '-1'
+              newvalue: Disabled
+        - uuid: 59b4f70ea1ec4231926e54414bdd966c
+          name: 'WLED On/Off'
+          mappings:
+            - value: '0'
+              newvalue: 'Off'
+            - value: '1'
+              newvalue: 'On'
+        - uuid: e56cf61afc0f4203a047f921ec550c21
+          name: 'WLED Preset'
+          mappings:
+            - value: '-1'
+              newvalue: None
+        - uuid: ece6673a5bc842fca78eaa93d03ec766
+          name: 'WLED WebSocket clients'
+          mappings:
+            - value: '-1'
+              newvalue: 'Not supported'
+        - uuid: 3022249cc09946f99b4d7f08db274b9b
+          name: 'WLED Yes/No'
+          mappings:
+            - value: '0'
+              newvalue: 'No'
+            - value: '1'
+              newvalue: 'Yes'
+  graphs:
+    - uuid: e95b82f3768f4f9d89ba0362ce0b8c16
+      name: 'WLED: Frame rate'
+      graph_items:
+        - drawtype: GRADIENT_LINE
+          color: '1A7C11'
+          item:
+            host: 'WLED by HTTP'
+            key: wled.leds.fps
+    - uuid: e07d9ebec1eb40fa86994bb7819062d0
+      name: 'WLED: Free heap memory'
+      graph_items:
+        - drawtype: GRADIENT_LINE
+          color: '199C0D'
+          item:
+            host: 'WLED by HTTP'
+            key: wled.memory.free
+    - uuid: fe5d9204f20e4d2e9094b2af0e471021
+      name: 'WLED: LED current and power'
+      graph_items:
+        - drawtype: BOLD_LINE
+          color: 'F63100'
+          item:
+            host: 'WLED by HTTP'
+            key: wled.leds.current
+        - sortorder: '1'
+          drawtype: DASHED_LINE
+          color: '2774A4'
+          item:
+            host: 'WLED by HTTP'
+            key: wled.leds.current.max
+        - sortorder: '2'
+          color: 'F7941D'
+          yaxisside: RIGHT
+          item:
+            host: 'WLED by HTTP'
+            key: wled.leds.power
+    - uuid: 25300494485f44ea82202176c8cb2a50
+      name: 'WLED: Wi-Fi signal'
+      graph_items:
+        - drawtype: BOLD_LINE
+          color: '2774A4'
+          item:
+            host: 'WLED by HTTP'
+            key: wled.wifi.rssi
+        - sortorder: '1'
+          color: 'FC6EA3'
+          yaxisside: RIGHT
+          item:
+            host: 'WLED by HTTP'
+            key: wled.wifi.signal

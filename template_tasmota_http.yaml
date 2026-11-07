@@ -1,0 +1,912 @@
+zabbix_export:
+  version: '8.0'
+  template_groups:
+    - uuid: b4ac72ca2a2d49d8aa04209f744bb15a
+      name: Templates/Applications
+  templates:
+    - uuid: c1e2f3a4b5d64c7d8e9f0a1b2c3d4e5f
+      template: 'Tasmota by HTTP'
+      name: 'Tasmota by HTTP'
+      description: |
+        Monitors Tasmota-flashed devices (Sonoff, ESP8266, ESP32) through the Tasmota HTTP API using the Zabbix HTTP agent only.
+
+        Five HTTP agent master items fetch the base status documents per polling interval:
+        - Status (Status 0): full base status (Status + StatusSTS + all sections)
+        - Status.FRM (Status 2): firmware info (StatusFWR)
+        - Status.MEM (Status 4): memory/flash info (StatusMEM)
+        - Status.NET (Status 5): network info (StatusNET)
+        - Status.MQT (Status 6): MQTT info (StatusMQT)
+
+        Scope: status only. Power/energy, light bulb controls, IR data, per-relay state and sensors are not collected.
+
+        Note: Status 0 already returns StatusFWR, StatusMEM, StatusNET and StatusMQT. The separate masters are kept for clarity and are functionally redundant; if you want to reduce HTTP calls, delete them and repoint the dependent items to the Status master.
+      wizard_ready: 'YES'
+      readme: |
+        ## Overview
+
+        This template monitors a [Tasmota](https://tasmota.github.io/docs/) device through its [HTTP API](https://tasmota.github.io/docs/Commands/#http-commands) using the Zabbix HTTP agent.
+
+        Five HTTP agent master items fetch the base status documents per polling interval:
+
+        |Master item|Command|Section|
+        |---|---|---|
+        |Status|`Status 0`|Status, StatusSTS, and all other sections|
+        |Status.FRM|`Status 2`|StatusFWR|
+        |Status.MEM|`Status 4`|StatusMEM|
+        |Status.NET|`Status 5`|StatusNET|
+        |Status.MQT|`Status 6`|StatusMQT|
+
+        ## Scope
+
+        Status only — no power/energy, no light bulb controls, no IR, no relay discovery, no sensor discovery.
+
+        ## Notes on field naming
+
+        In modern Tasmota (13.0 and later):
+        - `StatusSTS.Wifi.RSSI` — signal strength as percentage (0–100), mapped to `Status_Wifi_RSSI`
+        - `StatusSTS.Wifi.Signal` — signal strength in dBm (negative), mapped to `Status_Wifi_Signal`
+
+        Wi-Fi triggers watch `Status_Wifi_Signal` (dBm).
+
+        If the device does not expose a particular section, the corresponding items simply show "no data" — they do not error (`DISCARD_VALUE`).
+
+        ## Setup
+
+        1. Ensure the Zabbix server or proxy can reach the Tasmota device over HTTP (default port 80).
+        2. Create a host, set its interface to the Tasmota IP or DNS name, and link this template.
+        3. If the device has a Tasmota `WebPassword` configured, set `{$TASMOTA.USER}` (default `admin`) and `{$TASMOTA.PASS}` on the host.
+        4. Optionally change `{$TASMOTA.SCHEME}`, `{$TASMOTA.PORT}` and `{$TASMOTA.STATUS.CMD}`.
+
+        ## Macros used
+
+        |Name|Description|Default|
+        |----|-----------|-------|
+        |{$TASMOTA.SCHEME}|Request scheme.|`http`|
+        |{$TASMOTA.PORT}|HTTP port of the Tasmota web server.|`80`|
+        |{$TASMOTA.USER}|Tasmota web username.|`admin`|
+        |{$TASMOTA.PASS}|Tasmota web password. Leave empty if not set.|*empty*|
+        |{$TASMOTA.STATUS.CMD}|URL-encoded command for the Status master item.|`Status%200`|
+        |{$TASMOTA.DATA.INTERVAL}|Polling interval of all master items.|`1m`|
+        |{$TASMOTA.TIMEOUT}|HTTP request timeout.|`10s`|
+        |{$TASMOTA.NODATA.TIMEOUT}|No-data timeout.|`5m`|
+        |{$TASMOTA.RSSI.MIN.WARN}|Wi-Fi RSSI (dBm) warning threshold.|`-80`|
+        |{$TASMOTA.RSSI.MIN.CRIT}|Wi-Fi RSSI (dBm) critical threshold.|`-90`|
+      vendor:
+        name: Community
+        version: 8.0-8
+      groups:
+        - name: Templates/Applications
+      macros:
+        - macro: '{$TASMOTA.SCHEME}'
+          value: http
+          description: 'Request scheme: http or https.'
+          config:
+            type: LIST
+            priority: '2'
+            label: 'Request scheme'
+            required: 'YES'
+            options:
+              - value: http
+                text: HTTP
+              - value: https
+                text: HTTPS
+        - macro: '{$TASMOTA.PORT}'
+          value: '80'
+          description: 'HTTP port of the Tasmota web server.'
+          config:
+            type: TEXT
+            priority: '3'
+            label: 'Tasmota port'
+            required: 'YES'
+            regex: '^[0-9]+$'
+        - macro: '{$TASMOTA.USER}'
+          value: admin
+          description: 'Tasmota web username.'
+          config:
+            type: TEXT
+            priority: '4'
+            label: 'Tasmota username'
+            required: 'YES'
+        - macro: '{$TASMOTA.PASS}'
+          value: ''
+          type: SECRET_TEXT
+          description: 'Tasmota web password. Leave empty if WebPassword is not set on the device.'
+        - macro: '{$TASMOTA.STATUS.CMD}'
+          value: 'Status%200'
+          description: 'URL-encoded Tasmota command for the Status master item.'
+          config:
+            type: TEXT
+            priority: '6'
+            label: 'Status command'
+            required: 'YES'
+        - macro: '{$TASMOTA.DATA.INTERVAL}'
+          value: 1m
+          description: 'Polling interval of all master items.'
+          config:
+            type: TEXT
+            priority: '7'
+            label: 'Polling interval'
+            required: 'YES'
+        - macro: '{$TASMOTA.TIMEOUT}'
+          value: 10s
+          description: 'HTTP request timeout.'
+          config:
+            type: TEXT
+            priority: '8'
+            label: 'Request timeout'
+            required: 'YES'
+        - macro: '{$TASMOTA.NODATA.TIMEOUT}'
+          value: 5m
+          description: 'Time without data after which the device is considered unreachable.'
+          config:
+            type: TEXT
+            priority: '9'
+            section_name: Thresholds
+            label: 'No data timeout'
+        - macro: '{$TASMOTA.RSSI.MIN.WARN}'
+          value: '-80'
+          description: 'Wi-Fi RSSI warning threshold (dBm).'
+          config:
+            type: TEXT
+            priority: '10'
+            section_name: Thresholds
+            label: 'Minimum Wi-Fi RSSI (warning), dBm'
+            regex: '^-?[0-9]+$'
+        - macro: '{$TASMOTA.RSSI.MIN.CRIT}'
+          value: '-90'
+          description: 'Wi-Fi RSSI critical threshold (dBm).'
+          config:
+            type: TEXT
+            priority: '11'
+            section_name: Thresholds
+            label: 'Minimum Wi-Fi RSSI (critical), dBm'
+            regex: '^-?[0-9]+$'
+      items:
+        - uuid: d0000000000140008000000000000001
+          name: 'Status'
+          type: HTTP_AGENT
+          key: Status
+          delay: '{$TASMOTA.DATA.INTERVAL}'
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$TASMOTA.TIMEOUT}'
+          description: 'Raw JSON for "Status 0" — full base status document.'
+          url: '{$TASMOTA.SCHEME}://{HOST.CONN}:{$TASMOTA.PORT}/cm?user={$TASMOTA.USER}&password={$TASMOTA.PASS}&cmnd={$TASMOTA.STATUS.CMD}'
+          headers:
+            - name: Accept
+              value: application/json
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          tags:
+            - tag: component
+              value: raw
+          triggers:
+            - uuid: d0000000000740008000000000000001
+              expression: 'nodata(/Tasmota by HTTP/Status,{$TASMOTA.NODATA.TIMEOUT})=1'
+              name: 'Tasmota: Failed to fetch data from device'
+              priority: AVERAGE
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: d0000000000140008000000000000002
+          name: 'Status.FRM'
+          type: HTTP_AGENT
+          key: StatusFRM
+          delay: '{$TASMOTA.DATA.INTERVAL}'
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$TASMOTA.TIMEOUT}'
+          description: 'Raw JSON for "Status 2" — StatusFWR section.'
+          url: '{$TASMOTA.SCHEME}://{HOST.CONN}:{$TASMOTA.PORT}/cm?user={$TASMOTA.USER}&password={$TASMOTA.PASS}&cmnd=Status%202'
+          headers:
+            - name: Accept
+              value: application/json
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          tags:
+            - tag: component
+              value: raw
+        - uuid: d0000000000140008000000000000003
+          name: 'Status.MEM'
+          type: HTTP_AGENT
+          key: StatusMEM
+          delay: '{$TASMOTA.DATA.INTERVAL}'
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$TASMOTA.TIMEOUT}'
+          description: 'Raw JSON for "Status 4" — StatusMEM section.'
+          url: '{$TASMOTA.SCHEME}://{HOST.CONN}:{$TASMOTA.PORT}/cm?user={$TASMOTA.USER}&password={$TASMOTA.PASS}&cmnd=Status%204'
+          headers:
+            - name: Accept
+              value: application/json
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          tags:
+            - tag: component
+              value: raw
+        - uuid: d0000000000140008000000000000004
+          name: 'Status.NET'
+          type: HTTP_AGENT
+          key: StatusNET
+          delay: '{$TASMOTA.DATA.INTERVAL}'
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$TASMOTA.TIMEOUT}'
+          description: 'Raw JSON for "Status 5" — StatusNET section.'
+          url: '{$TASMOTA.SCHEME}://{HOST.CONN}:{$TASMOTA.PORT}/cm?user={$TASMOTA.USER}&password={$TASMOTA.PASS}&cmnd=Status%205'
+          headers:
+            - name: Accept
+              value: application/json
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          tags:
+            - tag: component
+              value: raw
+        - uuid: d0000000000140008000000000000005
+          name: 'Status.MQT'
+          type: HTTP_AGENT
+          key: StatusMQT
+          delay: '{$TASMOTA.DATA.INTERVAL}'
+          history: 90d
+          value_type: TEXT
+          trends: '0'
+          timeout: '{$TASMOTA.TIMEOUT}'
+          description: 'Raw JSON for "Status 6" — StatusMQT section.'
+          url: '{$TASMOTA.SCHEME}://{HOST.CONN}:{$TASMOTA.PORT}/cm?user={$TASMOTA.USER}&password={$TASMOTA.PASS}&cmnd=Status%206'
+          headers:
+            - name: Accept
+              value: application/json
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          tags:
+            - tag: component
+              value: raw
+        - uuid: d0000000000240008000000000000001
+          name: 'Status: Status_Devicename'
+          type: DEPENDENT
+          key: Status_Devicename
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'Status.DeviceName.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.Status.DeviceName'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: system
+        - uuid: d0000000000240008000000000000002
+          name: 'Status: Status_FriendlyName'
+          type: DEPENDENT
+          key: Status_FriendlyName
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'Status.FriendlyName[0].'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.Status.FriendlyName[0]'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: system
+        - uuid: d0000000000240008000000000000003
+          name: 'Status: Status_Temperature'
+          type: DEPENDENT
+          key: Status_Temperature
+          value_type: FLOAT
+          units: '°C'
+          history: 90d
+          trends: 365d
+          description: 'StatusSTS.Temperature. Only reported by some hardware.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusSTS.Temperature'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: system
+        - uuid: d0000000000240008000000000000004
+          name: 'Status: Status_Topic'
+          type: DEPENDENT
+          key: Status_Topic
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'Status.Topic — MQTT topic base.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.Status.Topic'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: system
+        - uuid: d0000000000240008000000000000005
+          name: 'Status: Status_Wifi_Channel'
+          type: DEPENDENT
+          key: Status_Wifi_Channel
+          value_type: FLOAT
+          history: 90d
+          trends: 365d
+          description: 'StatusSTS.Wifi.Channel.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusSTS.Wifi.Channel'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: wifi
+        - uuid: d0000000000240008000000000000006
+          name: 'Status: Status_Wifi_Mode'
+          type: DEPENDENT
+          key: Status_Wifi_Mode
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusSTS.Wifi.Mode — e.g. "11n".'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusSTS.Wifi.Mode'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: wifi
+        - uuid: d0000000000240008000000000000007
+          name: 'Status: Status_Wifi_RSSI'
+          type: DEPENDENT
+          key: Status_Wifi_RSSI
+          value_type: FLOAT
+          units: '%'
+          history: 90d
+          trends: 365d
+          description: 'StatusSTS.Wifi.RSSI — signal strength as percentage (0-100).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusSTS.Wifi.RSSI'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: wifi
+        - uuid: d0000000000240008000000000000008
+          name: 'Status: Status_Wifi_Signal'
+          type: DEPENDENT
+          key: Status_Wifi_Signal
+          value_type: FLOAT
+          units: dBm
+          history: 90d
+          trends: 365d
+          description: 'StatusSTS.Wifi.Signal — signal strength in dBm (negative).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusSTS.Wifi.Signal'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: wifi
+          triggers:
+            - uuid: d0000000000740008000000000000003
+              expression: 'max(/Tasmota by HTTP/Status_Wifi_Signal,10m)<{$TASMOTA.RSSI.MIN.WARN}'
+              name: 'Tasmota: Wi-Fi signal is weak'
+              priority: WARNING
+              dependencies:
+                - name: 'Tasmota: Failed to fetch data from device'
+                  expression: 'nodata(/Tasmota by HTTP/Status,{$TASMOTA.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: scope
+                  value: performance
+            - uuid: d0000000000740008000000000000004
+              expression: 'max(/Tasmota by HTTP/Status_Wifi_Signal,10m)<{$TASMOTA.RSSI.MIN.CRIT}'
+              name: 'Tasmota: Wi-Fi signal is very weak'
+              priority: HIGH
+              dependencies:
+                - name: 'Tasmota: Failed to fetch data from device'
+                  expression: 'nodata(/Tasmota by HTTP/Status,{$TASMOTA.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: scope
+                  value: performance
+        - uuid: d0000000000240008000000000000009
+          name: 'Status: Status_Wifi_SSId'
+          type: DEPENDENT
+          key: Status_Wifi_SSId
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusSTS.Wifi.SSId — connected SSID.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusSTS.Wifi.SSId'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: Status
+          tags:
+            - tag: component
+              value: wifi
+        - uuid: d0000000000340008000000000000001
+          name: 'Status.FRM: FWR_Hardware'
+          type: DEPENDENT
+          key: FWR_Hardware
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusFWR.Hardware.'
+          inventory_link: HARDWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusFWR.Hardware'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusFRM
+          tags:
+            - tag: component
+              value: system
+        - uuid: d0000000000340008000000000000002
+          name: 'Status.FRM: FWR_Version'
+          type: DEPENDENT
+          key: FWR_Version
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusFWR.Version.'
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusFWR.Version'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusFRM
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: d0000000000740008000000000000002
+              expression: 'last(/Tasmota by HTTP/FWR_Version,#1)<>last(/Tasmota by HTTP/FWR_Version,#2) and length(last(/Tasmota by HTTP/FWR_Version))>0'
+              name: 'Tasmota: Firmware version has changed'
+              priority: INFO
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: d0000000000440008000000000000001
+          name: 'Status.MEM: MEM_ProgramSize'
+          type: DEPENDENT
+          key: MEM_ProgramSize
+          value_type: FLOAT
+          units: KB
+          history: 90d
+          trends: '0'
+          description: 'StatusMEM.ProgramSize — firmware program size.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMEM.ProgramSize'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMEM
+          tags:
+            - tag: component
+              value: memory
+        - uuid: d0000000000440008000000000000002
+          name: 'Status.MEM: MEM_Free'
+          type: DEPENDENT
+          key: MEM_Free
+          value_type: FLOAT
+          units: KB
+          history: 90d
+          trends: 365d
+          description: 'StatusMEM.Free — free program memory.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMEM.Free'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: StatusMEM
+          tags:
+            - tag: component
+              value: memory
+        - uuid: d0000000000440008000000000000003
+          name: 'Status.MEM: MEM_Heap'
+          type: DEPENDENT
+          key: MEM_Heap
+          value_type: FLOAT
+          units: KB
+          history: 90d
+          trends: 365d
+          description: 'StatusMEM.Heap — free heap sampled during the memory check.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMEM.Heap'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: StatusMEM
+          tags:
+            - tag: component
+              value: memory
+        - uuid: d0000000000440008000000000000004
+          name: 'Status.MEM: MEM_ProgramFlashSize'
+          type: DEPENDENT
+          key: MEM_ProgramFlashSize
+          value_type: FLOAT
+          units: KB
+          history: 90d
+          trends: '0'
+          description: 'StatusMEM.ProgramFlashSize.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMEM.ProgramFlashSize'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMEM
+          tags:
+            - tag: component
+              value: memory
+        - uuid: d0000000000440008000000000000005
+          name: 'Status.MEM: MEM_FlashSize'
+          type: DEPENDENT
+          key: MEM_FlashSize
+          value_type: FLOAT
+          units: KB
+          history: 90d
+          trends: '0'
+          description: 'StatusMEM.FlashSize.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMEM.FlashSize'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMEM
+          tags:
+            - tag: component
+              value: memory
+        - uuid: d0000000000440008000000000000006
+          name: 'Status.MEM: MEM_FlashFrequency'
+          type: DEPENDENT
+          key: MEM_FlashFrequency
+          value_type: FLOAT
+          units: MHz
+          history: 90d
+          trends: '0'
+          description: 'StatusMEM.FlashFrequency.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMEM.FlashFrequency'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMEM
+          tags:
+            - tag: component
+              value: memory
+        - uuid: d0000000000440008000000000000007
+          name: 'Status.MEM: MEM_FlashMode'
+          type: DEPENDENT
+          key: MEM_FlashMode
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusMEM.FlashMode — e.g. DOUT, QIO.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMEM.FlashMode'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMEM
+          tags:
+            - tag: component
+              value: memory
+        - uuid: d0000000000540008000000000000001
+          name: 'Status.MQT: MQT.Mqtt.Host'
+          type: DEPENDENT
+          key: Mqtt.Host
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusMQT.MqttHost.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMQT.MqttHost'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMQT
+          tags:
+            - tag: component
+              value: mqtt
+        - uuid: d0000000000540008000000000000002
+          name: 'Status.MQT: MQT.MqttClient'
+          type: DEPENDENT
+          key: MqttClient
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusMQT.MqttClient.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMQT.MqttClient'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMQT
+          tags:
+            - tag: component
+              value: mqtt
+        - uuid: d0000000000540008000000000000003
+          name: 'Status.MQT: MQT.MqttUser'
+          type: DEPENDENT
+          key: MqttUser
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusMQT.MqttUser.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMQT.MqttUser'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMQT
+          tags:
+            - tag: component
+              value: mqtt
+        - uuid: d0000000000540008000000000000004
+          name: 'Status.MQT: MQT.Mqtt.Port'
+          type: DEPENDENT
+          key: Mqtt.Port
+          value_type: FLOAT
+          history: 90d
+          trends: '0'
+          description: 'StatusMQT.MqttPort.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMQT.MqttPort'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMQT
+          tags:
+            - tag: component
+              value: mqtt
+        - uuid: d0000000000540008000000000000005
+          name: 'Status.MQT: MQT.MqttClientMask'
+          type: DEPENDENT
+          key: MqttClientMask
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusMQT.MqttClientMask.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMQT.MqttClientMask'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMQT
+          tags:
+            - tag: component
+              value: mqtt
+        - uuid: d0000000000540008000000000000006
+          name: 'Status.MQT: MQT.MqttCount'
+          type: DEPENDENT
+          key: MqttCount
+          value_type: FLOAT
+          history: 90d
+          trends: 365d
+          description: 'StatusMQT.MqttCount — MQTT connections since boot.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMQT.MqttCount'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: StatusMQT
+          tags:
+            - tag: component
+              value: mqtt
+        - uuid: d0000000000540008000000000000007
+          name: 'Status.MQT: MQT.MqttTLS'
+          type: DEPENDENT
+          key: MqttTLS
+          value_type: FLOAT
+          history: 90d
+          trends: '0'
+          description: 'StatusMQT.MqttTLS — 0 = plain MQTT, 1 = TLS.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusMQT.MqttTLS'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusMQT
+          tags:
+            - tag: component
+              value: mqtt
+        - uuid: d0000000000640008000000000000001
+          name: 'Status.NET: NET.IPAddress'
+          type: DEPENDENT
+          key: NET.IPAddress
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusNET.IPAddress.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusNET.IPAddress'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusNET
+          tags:
+            - tag: component
+              value: network
+        - uuid: d0000000000640008000000000000002
+          name: 'Status.NET: NET.Mac'
+          type: DEPENDENT
+          key: NET.Mac
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusNET.Mac.'
+          inventory_link: MACADDRESS_A
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusNET.Mac'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusNET
+          tags:
+            - tag: component
+              value: network
+        - uuid: d0000000000640008000000000000003
+          name: 'Status.NET: NET.WifiPower'
+          type: DEPENDENT
+          key: NET.WifiPower
+          value_type: FLOAT
+          units: dBm
+          history: 90d
+          trends: 365d
+          description: 'StatusNET.WifiPower — Wi-Fi transmit power.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusNET.WifiPower'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: StatusNET
+          tags:
+            - tag: component
+              value: network
+        - uuid: d0000000000640008000000000000004
+          name: 'Status.NET: NET_Hostname'
+          type: DEPENDENT
+          key: NET_Hostname
+          history: 90d
+          value_type: CHAR
+          trends: '0'
+          description: 'StatusNET.Hostname.'
+          inventory_link: NAME
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.StatusNET.Hostname'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: StatusNET
+          tags:
+            - tag: component
+              value: network
+      tags:
+        - tag: class
+          value: hardware
+        - tag: target
+          value: tasmota
