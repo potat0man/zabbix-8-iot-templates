@@ -1,0 +1,575 @@
+zabbix_export:
+  version: '8.0'
+  template_groups:
+    - uuid: 234eeee545af4bbbbc06a29a023afe79
+      name: 'Templates/Network devices'
+  templates:
+    - uuid: 597b5d493f244743b65d5623800d0632
+      template: 'ESPHome by HTTP'
+      name: 'ESPHome by HTTP'
+      description: |
+        ESPHome node via the stock web_server REST API only (v2/v3, name-based URLs, ESPHome 2025.x+).
+        No device-side additions, no external scripts.
+
+        The REST API has no "list entities" endpoint, so entities come from the catalog in
+        {$ESPHOME.ENTITIES}, groups separated by ';':
+          host1 host2=domain/Entity Name[|unit],domain/Entity Name;host3=...
+        Hosts = Zabbix technical host names (space-separated), '*' = any host. The default value
+        already lists all current nodes; add new hosts/entities there, or override per host with '*=...'.
+        Entity Name = name as in the ESPHome YAML. No single quotes, commas, ';' or '=' in names.
+        Types: sensor, number -> float; binary_sensor, switch, fan, light -> 0/1; anything else -> text.
+        Host needs an interface with the device IP ({HOST.CONN}).
+
+        Macros:
+          {$ESPHOME.PORT} - web_server port
+          {$ESPHOME.USER} / {$ESPHOME.PASSWORD} - web_server auth (empty if no auth)
+          {$ESPHOME.INTERVAL} - polling interval
+          {$ESPHOME.TIMEOUT} - HTTP timeout
+          {$ESPHOME.UPTIME.PATH} - uptime entity (text_sensor "1d2h3m" or numeric sensor in seconds)
+          {$ESPHOME.ENTITIES} - entity catalog (see above)
+          {$ESPHOME.NODATA} - no-data window for the "unavailable" trigger
+          {$ESPHOME.ENTITY.NODATA} - no-data window for a numeric entity (NaN / sensor failed)
+          {$ESPHOME.WIFI.RSSI.MIN} - weak Wi-Fi threshold, dBm
+          {$ESPHOME.HEAP.MIN} - low free heap threshold, bytes
+
+        Fixed items expect these entities on every node (shared base package):
+          sensor: WiFi Signal, Heap Free, Loop Time (debug); text_sensor: IP, SSID, BSSID (wifi_info),
+          Uptime, Firmware (version), Reset Reason (debug).
+      groups:
+        - name: 'Templates/Network devices'
+      items:
+        - uuid: 20ad54da7e584a7aa6330fa97e776f11
+          name: 'Uptime'
+          type: HTTP_AGENT
+          key: esphome.uptime
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: UNSIGNED
+          units: uptime
+          description: 'Uptime from {$ESPHOME.UPTIME.PATH}. Also the master item for entity discovery.'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/{$ESPHOME.UPTIME.PATH}'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var v = JSON.parse(value).value;
+                  if (typeof v === 'number') return Math.round(v);
+                  var u = {d: 86400, h: 3600, m: 60, s: 1}, re = /(\d+)\s*([dhms])/g, s = 0, m;
+                  while ((m = re.exec(String(v))) !== null) s += m[1] * u[m[2]];
+                  return s;
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: 14d16eb532ed41e4bfcfb34288ee99f6
+              expression: 'last(/ESPHome by HTTP/esphome.uptime)<10m'
+              name: 'ESPHome: Device has been restarted'
+              event_name: 'ESPHome: Device has been restarted (uptime < 10m)'
+              priority: WARNING
+              manual_close: 'YES'
+              dependencies:
+                - name: 'ESPHome: Web API unavailable'
+                  expression: 'nodata(/ESPHome by HTTP/esphome.uptime,{$ESPHOME.NODATA})=1'
+              tags:
+                - tag: scope
+                  value: notice
+            - uuid: 1f12083082024b8087fe194016ff298a
+              expression: 'nodata(/ESPHome by HTTP/esphome.uptime,{$ESPHOME.NODATA})=1'
+              name: 'ESPHome: Web API unavailable'
+              event_name: 'ESPHome: Web API unavailable (no data for {$ESPHOME.NODATA})'
+              priority: AVERAGE
+              description: 'Device offline, wrong credentials or wrong {$ESPHOME.UPTIME.PATH}. See the Uptime item error.'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 578d8f4395f548b2a573f8091d3804ce
+          name: 'WiFi Signal'
+          type: HTTP_AGENT
+          key: esphome.wifi.rssi
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: FLOAT
+          units: 'dBm'
+          description: 'sensor/WiFi%20Signal'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/sensor/WiFi%20Signal'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.value
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          tags:
+            - tag: component
+              value: network
+          triggers:
+            - uuid: 8b530157a53148ccadb606e14e4fe31f
+              expression: 'max(/ESPHome by HTTP/esphome.wifi.rssi,10m)<{$ESPHOME.WIFI.RSSI.MIN}'
+              name: 'ESPHome: Weak Wi-Fi signal'
+              event_name: 'ESPHome: Weak Wi-Fi signal (< {$ESPHOME.WIFI.RSSI.MIN} dBm for 10m)'
+              priority: WARNING
+              description: 'RSSI below {$ESPHOME.WIFI.RSSI.MIN} dBm for 10 minutes.'
+              dependencies:
+                - name: 'ESPHome: Web API unavailable'
+                  expression: 'nodata(/ESPHome by HTTP/esphome.uptime,{$ESPHOME.NODATA})=1'
+        - uuid: 17bf020bb16641fe8747c99ce7637067
+          name: 'SSID'
+          type: HTTP_AGENT
+          key: esphome.wifi.ssid
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: CHAR
+          description: 'text_sensor/SSID'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/text_sensor/SSID'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: network
+        - uuid: 5145c050eb394528b94ba3289c0191c9
+          name: 'BSSID'
+          type: HTTP_AGENT
+          key: esphome.wifi.bssid
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: CHAR
+          description: 'text_sensor/BSSID'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/text_sensor/BSSID'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: network
+        - uuid: 1b393805e10b4346bd4d8b39ceda4cfe
+          name: 'IP'
+          type: HTTP_AGENT
+          key: esphome.ip
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: CHAR
+          description: 'text_sensor/IP'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/text_sensor/IP'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: network
+        - uuid: fff28fbe37004550886ce48ae3b75d84
+          name: 'Heap Free'
+          type: HTTP_AGENT
+          key: esphome.heap.free
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: FLOAT
+          units: 'B'
+          description: 'sensor/Heap%20Free'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/sensor/Heap%20Free'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.value
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: 91d3b679796a472c857fbf078e48f843
+              expression: 'max(/ESPHome by HTTP/esphome.heap.free,10m)<{$ESPHOME.HEAP.MIN}'
+              name: 'ESPHome: Low free heap'
+              event_name: 'ESPHome: Low free heap (< {$ESPHOME.HEAP.MIN} for 10m)'
+              priority: WARNING
+              description: 'Free heap below {$ESPHOME.HEAP.MIN} bytes for 10 minutes.'
+              dependencies:
+                - name: 'ESPHome: Web API unavailable'
+                  expression: 'nodata(/ESPHome by HTTP/esphome.uptime,{$ESPHOME.NODATA})=1'
+        - uuid: 21c730f8692241f391fc5e8afa54b318
+          name: 'Loop Time'
+          type: HTTP_AGENT
+          key: esphome.loop_time
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: FLOAT
+          units: 'ms'
+          description: 'sensor/Loop%20Time'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/sensor/Loop%20Time'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.value
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          tags:
+            - tag: component
+              value: system
+        - uuid: c9d726451f3340239c2d962cbffe3825
+          name: 'Firmware'
+          type: HTTP_AGENT
+          key: esphome.firmware
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: CHAR
+          description: 'text_sensor/Firmware'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/text_sensor/Firmware'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state
+            - type: REGEX
+              parameters:
+                - '^(\S+)'
+                - '\1'
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: ed9797428fb24beb9facba72820a7db3
+              expression: 'last(/ESPHome by HTTP/esphome.firmware,#1)<>last(/ESPHome by HTTP/esphome.firmware,#2) and length(last(/ESPHome by HTTP/esphome.firmware))>0'
+              name: 'ESPHome: Firmware version changed'
+              event_name: 'ESPHome: Firmware version changed (now {ITEM.VALUE})'
+              priority: INFO
+              manual_close: 'YES'
+              description: 'ESPHome version differs from the previous value.'
+              dependencies:
+                - name: 'ESPHome: Web API unavailable'
+                  expression: 'nodata(/ESPHome by HTTP/esphome.uptime,{$ESPHOME.NODATA})=1'
+        - uuid: 62516faba63b45d7a32a5e5eb7680d0e
+          name: 'Reset Reason'
+          type: HTTP_AGENT
+          key: esphome.reset_reason
+          delay: '{$ESPHOME.INTERVAL}'
+          history: 7d
+          value_type: CHAR
+          description: 'text_sensor/Reset%20Reason'
+          timeout: '{$ESPHOME.TIMEOUT}'
+          url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/text_sensor/Reset%20Reason'
+          authtype: BASIC
+          username: '{$ESPHOME.USER}'
+          password: '{$ESPHOME.PASSWORD}'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.state
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+      discovery_rules:
+        - uuid: 0e11e7d9940541888996e766413f961d
+          name: 'Numeric entities discovery'
+          type: DEPENDENT
+          key: esphome.entities.num
+          delay: '0'
+          filter:
+            conditions:
+              - macro: '{#TYPE}'
+                value: '^num$'
+                formulaid: A
+              - macro: '{#HOSTS}'
+                value: '(^| )({HOST.HOST}|\*)( |$)'
+                formulaid: B
+          lifetime: 7d
+          enabled_lifetime_type: DISABLE_NEVER
+          description: 'Entities of type num from {$ESPHOME.ENTITIES}.'
+          item_prototypes:
+            - uuid: 5c6d603fc2dc44a5aaf02b524c280557
+              name: '{#NAME}'
+              type: HTTP_AGENT
+              key: 'esphome.num["{#DOMAIN}","{#NAME}"]'
+              delay: '{$ESPHOME.INTERVAL}'
+              history: 7d
+              value_type: FLOAT
+              units: '{#UNIT}'
+              description: '{#DOMAIN}/{#NAME}'
+              timeout: '{$ESPHOME.TIMEOUT}'
+              url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/{#DOMAIN}/{#URLNAME}'
+              authtype: BASIC
+              username: '{$ESPHOME.USER}'
+              password: '{$ESPHOME.PASSWORD}'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.value
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+              tags:
+                - tag: component
+                  value: '{#DOMAIN}'
+              trigger_prototypes:
+                - uuid: cdc7003f36304d2cb995e2bbee6acc7f
+                  expression: 'nodata(/ESPHome by HTTP/esphome.num["{#DOMAIN}","{#NAME}"],{$ESPHOME.ENTITY.NODATA})=1'
+                  name: 'ESPHome: {#NAME} has no value'
+                  event_name: 'ESPHome: {#NAME} has no value for {$ESPHOME.ENTITY.NODATA}'
+                  priority: WARNING
+                  description: 'Entity reports NaN (sensor not responding), or the name is wrong (404 in item error).'
+                  dependencies:
+                    - name: 'ESPHome: Web API unavailable'
+                      expression: 'nodata(/ESPHome by HTTP/esphome.uptime,{$ESPHOME.NODATA})=1'
+                  tags:
+                    - tag: scope
+                      value: availability
+          master_item:
+            key: esphome.uptime
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var t = {sensor: 'num', number: 'num', binary_sensor: 'bool', 'switch': 'bool', fan: 'bool', light: 'bool'};
+                  var out = [], groups = '{$ESPHOME.ENTITIES}'.split(';');
+                  for (var g = 0; g < groups.length; g++) {
+                    var q = groups[g].indexOf('=');
+                    if (q < 0) continue;
+                    var hosts = groups[g].slice(0, q).trim(), list = groups[g].slice(q + 1).split(',');
+                    for (var i = 0; i < list.length; i++) {
+                      var e = list[i].trim(), p = e.indexOf('/');
+                      if (p < 1) continue;
+                      var d = e.slice(0, p).trim(), r = e.slice(p + 1).split('|'), n = r[0].trim();
+                      if (!n) continue;
+                      out.push({'{#HOSTS}': hosts, '{#DOMAIN}': d, '{#NAME}': n, '{#URLNAME}': encodeURIComponent(n), '{#UNIT}': (r[1] || '').trim(), '{#TYPE}': t[d] || 'text'});
+                    }
+                  }
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+        - uuid: 7f95f09080ee44ea9e72b31a8e1ef801
+          name: 'On/off entities discovery'
+          type: DEPENDENT
+          key: esphome.entities.bool
+          delay: '0'
+          filter:
+            conditions:
+              - macro: '{#TYPE}'
+                value: '^bool$'
+                formulaid: A
+              - macro: '{#HOSTS}'
+                value: '(^| )({HOST.HOST}|\*)( |$)'
+                formulaid: B
+          lifetime: 7d
+          enabled_lifetime_type: DISABLE_NEVER
+          description: 'Entities of type bool from {$ESPHOME.ENTITIES}.'
+          item_prototypes:
+            - uuid: a378f1ff7e5644d7b0760150f8a90812
+              name: '{#NAME}'
+              type: HTTP_AGENT
+              key: 'esphome.bool["{#DOMAIN}","{#NAME}"]'
+              delay: '{$ESPHOME.INTERVAL}'
+              history: 7d
+              value_type: UNSIGNED
+              valuemap:
+                name: 'ESPHome on/off'
+              description: '{#DOMAIN}/{#NAME}'
+              timeout: '{$ESPHOME.TIMEOUT}'
+              url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/{#DOMAIN}/{#URLNAME}'
+              authtype: BASIC
+              username: '{$ESPHOME.USER}'
+              password: '{$ESPHOME.PASSWORD}'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.state
+                  error_handler: DISCARD_VALUE
+                - type: BOOL_TO_DECIMAL
+                  parameters:
+                    - ''
+                  error_handler: DISCARD_VALUE
+              tags:
+                - tag: component
+                  value: '{#DOMAIN}'
+          master_item:
+            key: esphome.uptime
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var t = {sensor: 'num', number: 'num', binary_sensor: 'bool', 'switch': 'bool', fan: 'bool', light: 'bool'};
+                  var out = [], groups = '{$ESPHOME.ENTITIES}'.split(';');
+                  for (var g = 0; g < groups.length; g++) {
+                    var q = groups[g].indexOf('=');
+                    if (q < 0) continue;
+                    var hosts = groups[g].slice(0, q).trim(), list = groups[g].slice(q + 1).split(',');
+                    for (var i = 0; i < list.length; i++) {
+                      var e = list[i].trim(), p = e.indexOf('/');
+                      if (p < 1) continue;
+                      var d = e.slice(0, p).trim(), r = e.slice(p + 1).split('|'), n = r[0].trim();
+                      if (!n) continue;
+                      out.push({'{#HOSTS}': hosts, '{#DOMAIN}': d, '{#NAME}': n, '{#URLNAME}': encodeURIComponent(n), '{#UNIT}': (r[1] || '').trim(), '{#TYPE}': t[d] || 'text'});
+                    }
+                  }
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+        - uuid: 5d7cb1ed137344a79d6bf246f3f17582
+          name: 'Text entities discovery'
+          type: DEPENDENT
+          key: esphome.entities.text
+          delay: '0'
+          filter:
+            conditions:
+              - macro: '{#TYPE}'
+                value: '^text$'
+                formulaid: A
+              - macro: '{#HOSTS}'
+                value: '(^| )({HOST.HOST}|\*)( |$)'
+                formulaid: B
+          lifetime: 7d
+          enabled_lifetime_type: DISABLE_NEVER
+          description: 'Entities of type text from {$ESPHOME.ENTITIES}.'
+          item_prototypes:
+            - uuid: 6af8036860524352ba73e951fb3449e2
+              name: '{#NAME}'
+              type: HTTP_AGENT
+              key: 'esphome.text["{#DOMAIN}","{#NAME}"]'
+              delay: '{$ESPHOME.INTERVAL}'
+              history: 7d
+              value_type: CHAR
+              description: '{#DOMAIN}/{#NAME}'
+              timeout: '{$ESPHOME.TIMEOUT}'
+              url: 'http://{HOST.CONN}:{$ESPHOME.PORT}/{#DOMAIN}/{#URLNAME}'
+              authtype: BASIC
+              username: '{$ESPHOME.USER}'
+              password: '{$ESPHOME.PASSWORD}'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - $.state
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              tags:
+                - tag: component
+                  value: '{#DOMAIN}'
+          master_item:
+            key: esphome.uptime
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var t = {sensor: 'num', number: 'num', binary_sensor: 'bool', 'switch': 'bool', fan: 'bool', light: 'bool'};
+                  var out = [], groups = '{$ESPHOME.ENTITIES}'.split(';');
+                  for (var g = 0; g < groups.length; g++) {
+                    var q = groups[g].indexOf('=');
+                    if (q < 0) continue;
+                    var hosts = groups[g].slice(0, q).trim(), list = groups[g].slice(q + 1).split(',');
+                    for (var i = 0; i < list.length; i++) {
+                      var e = list[i].trim(), p = e.indexOf('/');
+                      if (p < 1) continue;
+                      var d = e.slice(0, p).trim(), r = e.slice(p + 1).split('|'), n = r[0].trim();
+                      if (!n) continue;
+                      out.push({'{#HOSTS}': hosts, '{#DOMAIN}': d, '{#NAME}': n, '{#URLNAME}': encodeURIComponent(n), '{#UNIT}': (r[1] || '').trim(), '{#TYPE}': t[d] || 'text'});
+                    }
+                  }
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+      tags:
+        - tag: class
+          value: hardware
+        - tag: target
+          value: esphome
+      macros:
+        - macro: '{$ESPHOME.ENTITIES}'
+          value: 'air-bedroom air-kitchen air-livingroom=sensor/CO2|ppm,sensor/PM2.5|µg/m³,sensor/VOC,sensor/NOx;purifier-kitchen purifier-livingroom=sensor/Temperature|°C,sensor/Humidity|%,sensor/PM2.5|µg/m³,sensor/Filter|%,sensor/Motor Speed|rpm,number/Favorite Fan Level,binary_sensor/Filter Door,switch/Child Lock,switch/Notification Sounds,fan/Fan,select/Display Brightness,text_sensor/Device Fault;siren-kitchen siren-bedroom=switch/Siren;car=sensor/Voltage|V,sensor/Temperature|°C,sensor/Humidity|%'
+          description: 'Entity catalog: host1 host2=domain/Name[|unit],...;host3=... (* = any host)'
+        - macro: '{$ESPHOME.ENTITY.NODATA}'
+          value: 10m
+          description: 'No-data window for numeric entities'
+        - macro: '{$ESPHOME.HEAP.MIN}'
+          value: '10240'
+          description: 'Low free heap threshold, bytes'
+        - macro: '{$ESPHOME.INTERVAL}'
+          value: 1m
+          description: 'Polling interval'
+        - macro: '{$ESPHOME.NODATA}'
+          value: 5m
+          description: 'No-data window for the unavailable trigger'
+        - macro: '{$ESPHOME.PASSWORD}'
+          type: SECRET_TEXT
+          description: 'web_server auth password'
+        - macro: '{$ESPHOME.PORT}'
+          value: '80'
+          description: 'web_server port'
+        - macro: '{$ESPHOME.TIMEOUT}'
+          value: 5s
+          description: 'HTTP timeout'
+        - macro: '{$ESPHOME.UPTIME.PATH}'
+          value: text_sensor/Uptime
+          description: 'Uptime entity path, URL-encoded'
+        - macro: '{$ESPHOME.USER}'
+          description: 'web_server auth username'
+        - macro: '{$ESPHOME.WIFI.RSSI.MIN}'
+          value: '-80'
+          description: 'Weak Wi-Fi threshold, dBm'
+      valuemaps:
+        - uuid: f189cbce346e4ac7b3ef2fa72c65df87
+          name: 'ESPHome on/off'
+          mappings:
+            - value: '0'
+              newvalue: 'Off'
+            - value: '1'
+              newvalue: 'On'
