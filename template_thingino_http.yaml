@@ -1,0 +1,2837 @@
+zabbix_export:
+  version: '8.0'
+  template_groups:
+    - uuid: 192a8b7cd9c1428982e933183e7777ea
+      name: 'Templates/Video surveillance'
+  templates:
+    - uuid: 986b361631b34a968e6237230d84d90c
+      template: 'Thingino camera by HTTP'
+      name: 'Thingino camera by HTTP'
+      description: |-
+        Monitors cameras running the Thingino open-source firmware (https://thingino.com) with the Zabbix HTTP agent only:
+        no external scripts, no Zabbix agent on the camera.
+
+        Data comes from the camera web interface: /x/json-heartbeat-slow.cgi, /x/json-system-usage.cgi,
+        /x/json-sensor-info.cgi, /x/info.cgi (status, top, release), /x/json-prudynt.cgi (streams, motion; read-only)
+        and the Thingino camera agent API (/x/agent.cgi -> /api/v1/runtime and /api/v1/device). Every metric has one
+        item and one source: the one available on the widest range of firmware. Stream discovery needs the prudynt
+        streamer; with raptor or timps the other items still work.
+
+        Requirements: Thingino firmware with API keys (2026 builds). Stream health, storage mount state, recording
+        autostart, motion detected, network, hostname and camera ID come from the camera agent (/x/agent.cgi).
+        Firmware without the 2026-08-16 agent.cgi fix - including the "ciao" release branch - needs a one-line patch
+        on the camera for those items; see the trigger on the "API: Status" item.
+
+        Setup:
+        1. On the camera open Settings > Web Interface > API Access and generate an API key
+           (or add the Zabbix server/proxy IP to "Trusted IPs (skip login)" on that page).
+        2. Create a host with an interface (e.g. Agent) set to the camera IP or DNS name, link this template
+           and set {$THINGINO.API.KEY}. The camera address is taken from the host interface ({HOST.CONN}).
+        3. The defaults are https/443 (Thingino's uhttpd build). For a plain-HTTP web server (e.g. BusyBox httpd
+           without TLS) set {$THINGINO.SCHEME}=http and {$THINGINO.PORT}=80. Self-signed certificates are accepted.
+      wizard_ready: 'YES'
+      readme: |-
+        ## Overview
+
+        Monitors cameras running the [Thingino](https://thingino.com) open-source firmware with the Zabbix HTTP agent.
+        No external scripts are needed and nothing has to be installed on the camera.
+
+        Collected data: availability and API authentication, uptime, clock drift, load, memory, overlay (flash) usage,
+        streamer state, per-stream health and settings (RTSP listener, codec, resolution, frame rate, bitrate),
+        SD card / recording storage, continuous recording, day/night mode, ambient brightness and gain, IR-cut filter,
+        IR and white LEDs, microphone/speaker, motion detection, privacy mode, WireGuard, firmware version and
+        inventory data (model, SoC, MAC, hostname).
+
+        Endpoints used (all on the camera web interface):
+
+        - `/x/json-heartbeat-slow.cgi` - uptime, clock, day/night, recording, privacy, lights, audio
+        - `/x/json-system-usage.cgi` - memory and overlay usage
+        - `/x/info.cgi?name=status` - load average and mounted filesystems (`uptime`, `df -T`)
+        - `/x/info.cgi?name=top` - process list (is the streamer running)
+        - `/x/info.cgi?name=release` - firmware build and profile (`/etc/os-release`)
+        - `/x/json-sensor-info.cgi` - sensor and SoC model
+        - `/x/json-prudynt.cgi` - stream settings, live stream statistics, recorder state, motion detection (read-only query)
+        - `/x/agent.cgi?agent_path=/api/v1/runtime` - stream health, storage mount state, recording autostart, motion
+          detected, network
+        - `/x/agent.cgi?agent_path=/api/v1/device` - hostname and camera ID
+
+        Every metric has exactly one item, read from the source that is available on the widest range of firmware.
+
+        ## Requirements
+
+        Thingino firmware with API key support (2026 builds). Stream discovery needs the prudynt streamer (the
+        default); with raptor or timps all other items still work.
+
+        Firmware without the 2026-08-16 fix (Thingino master before that date, and the `ciao` release branch,
+        e.g. `firmware-2026-11-05`) has a bug in `/x/agent.cgi` ("Carriage return found in header" in Zabbix).
+        On such firmware only the agent-based items listed above stay empty and the "API: Status" item shows
+        "agent.cgi header bug: patch camera". Patch the camera over SSH (stored in the overlay, survives reboots):
+
+        ```
+        sed -i 's|text="Bad Gateway"; printf|text="Bad Gateway"; sub(/\\r$/, "", text); printf|' /var/www/x/agent.cgi
+        ```
+
+        After installing a firmware that contains the fix, restore the stock file:
+        `cp /rom/var/www/x/agent.cgi /var/www/x/agent.cgi`.
+
+        ## Setup
+
+        1. On the camera open *Settings > Web Interface > API Access* and click *Generate New Key*.
+           Alternatively, add the Zabbix server or proxy IP address to "Trusted IPs (skip login)" on the same page.
+        2. Create a host, set its interface (for example *Agent*) to the camera IP or DNS name and link this template.
+           The camera address is taken from the host interface (`{HOST.CONN}`). Put the key into the `API key` field
+           (`{$THINGINO.API.KEY}`).
+        3. The defaults (`https`, port `443`) match Thingino's default uhttpd web server. For a camera with a plain
+           HTTP web server (for example BusyBox httpd without TLS) choose `HTTP` and port `80`.
+           Certificates are not verified, so the camera's self-signed certificate works.
+      groups:
+        - name: 'Templates/Video surveillance'
+      items:
+        - uuid: b56746d845d946daa1b8599df37fc828
+          name: 'Get runtime data'
+          type: HTTP_AGENT
+          key: thingino.runtime.get
+          delay: '{$THINGINO.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: |-
+            Runtime state of the camera from the Thingino camera agent (`/api/v1/runtime`, proxied by the web UI endpoint `/x/agent.cgi`): stream health and RTSP listener, storage mount state, recording autostart, motion detected, network, day/night target mode and pending firmware upgrades.
+            Any HTTP status is accepted so that error bodies (e.g. 401) can be classified by the "API: Status" item; transport errors are turned into a "ZBX_ERROR: <message>" value instead of making the item unsupported.
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '0'
+                - .+
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'ZBX_ERROR: \0'
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: 'ZBX_ERROR: Unknown error'
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/agent.cgi'
+          query_fields:
+            - name: agent_path
+              value: /api/v1/runtime
+          status_codes: 200-599
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 759899455b8c4975ad889b11ea172e89
+          name: 'Get heartbeat data'
+          type: HTTP_AGENT
+          key: thingino.heartbeat.get
+          delay: '{$THINGINO.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'One-shot heartbeat used by the Thingino web UI: camera clock, day/night photosensing, colour mode, IR-cut filter, IR/white LEDs, audio and WireGuard state.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/json-heartbeat-slow.cgi'
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 186df42c88594e17aab8df06e07f104c
+          name: 'Get system usage'
+          type: HTTP_AGENT
+          key: thingino.usage.get
+          delay: '{$THINGINO.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'Memory and overlay (writable flash partition) usage from `/x/json-system-usage.cgi`.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/json-system-usage.cgi'
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 3fadde39fd404d39a7955c605a8e0d8e
+          name: 'Get system status'
+          type: HTTP_AGENT
+          key: thingino.status.get
+          delay: '{$THINGINO.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'Output of `uptime` and `df -T` from the web UI info page (`/x/info.cgi?name=status`), parsed into JSON: load averages and mounted filesystems. Does not depend on the camera agent.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  function b64text(b64) {
+                      var buf = atob(b64 || ''), out = '';
+                      if (typeof buf === 'string') {
+                          return buf;
+                      }
+                      for (var i = 0; i < buf.length; i++) {
+                          out += String.fromCharCode(buf[i]);
+                      }
+                      return out;
+                  }
+                  var data = JSON.parse(value);
+                  var cmds = data.commands || [];
+                  var out = {load: null, filesystems: []};
+                  for (var i = 0; i < cmds.length; i++) {
+                      var cmd = String(cmds[i].command);
+                      var body = b64text(cmds[i].output_base64);
+                      if (cmd === 'uptime') {
+                          var m = body.match(/load average:\s*([0-9.]+),?\s+([0-9.]+),?\s+([0-9.]+)/);
+                          if (m) {
+                              out.load = {avg1: parseFloat(m[1]), avg5: parseFloat(m[2]), avg15: parseFloat(m[3])};
+                          }
+                      }
+                      else if (/^df\b/.test(cmd)) {
+                          // BusyBox df prints devices longer than 20 characters on a line of their own.
+                          var lines = body.split('\n');
+                          var pending = null;
+                          for (var j = 1; j < lines.length; j++) {
+                              var f = lines[j].replace(/^\s+|\s+$/g, '').split(/\s+/);
+                              if (f.length === 1 && f[0] !== '') {
+                                  pending = f[0];
+                                  continue;
+                              }
+                              if (pending !== null && f.length === 6) {
+                                  f.unshift(pending);
+                              }
+                              pending = null;
+                              if (f.length < 7 || !/^[0-9]+$/.test(f[2]) || !/^[0-9]+$/.test(f[3]) || !/^[0-9]+$/.test(f[4])) {
+                                  continue;
+                              }
+                              out.filesystems.push({
+                                  device: f[0],
+                                  type: f[1],
+                                  mount: f.slice(6).join(' '),
+                                  total: parseInt(f[2], 10) * 1024,
+                                  used: parseInt(f[3], 10) * 1024,
+                                  free: parseInt(f[4], 10) * 1024
+                              });
+                          }
+                      }
+                  }
+                  return JSON.stringify(out);
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/info.cgi'
+          query_fields:
+            - name: name
+              value: status
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 9a3b50464b074eda8dab8135f88c7aa5
+          name: 'Get process list'
+          type: HTTP_AGENT
+          key: thingino.processes.get
+          delay: '{$THINGINO.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'Output of `top -n 1 -b` from the web UI info page (`/x/info.cgi?name=top`), parsed into JSON: number of processes and whether a streamer daemon (prudynt, rvd/raptor, timpsd/timps) is running.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  function b64text(b64) {
+                      var buf = atob(b64 || ''), out = '';
+                      if (typeof buf === 'string') {
+                          return buf;
+                      }
+                      for (var i = 0; i < buf.length; i++) {
+                          out += String.fromCharCode(buf[i]);
+                      }
+                      return out;
+                  }
+                  var data = JSON.parse(value);
+                  var cmds = data.commands || [];
+                  var body = null;
+                  for (var i = 0; i < cmds.length; i++) {
+                      if (/^top\b/.test(String(cmds[i].command))) {
+                          body = b64text(cmds[i].output_base64);
+                      }
+                  }
+                  if (body === null) {
+                      throw 'No top output in the response.';
+                  }
+                  // Streamer daemons: prudynt (prudynt-t), rvd (raptor), timpsd (timps).
+                  var names = {prudynt: 'prudynt', rvd: 'raptor', timpsd: 'timps'};
+                  var out = {processes: 0, streamer_running: 0, streamer: null};
+                  var lines = body.split('\n');
+                  var header = false;
+                  for (var j = 0; j < lines.length; j++) {
+                      if (!header) {
+                          header = /\bPID\b.*\bCOMMAND\b/.test(lines[j]);
+                          continue;
+                      }
+                      if (!/^\s*[0-9]+\s/.test(lines[j])) {
+                          continue;
+                      }
+                      out.processes++;
+                      var m = lines[j].match(/(?:^|\s)(?:\S*\/)?(prudynt|rvd|timpsd)(?:\s|$)/);
+                      if (m) {
+                          out.streamer_running = 1;
+                          out.streamer = names[m[1]];
+                      }
+                  }
+                  if (!header) {
+                      throw 'Unexpected top output.';
+                  }
+                  return JSON.stringify(out);
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/info.cgi'
+          query_fields:
+            - name: name
+              value: top
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: d0fd1ec3958a44ec8541bb7ea0ee917a
+          name: 'Get firmware release'
+          type: HTTP_AGENT
+          key: thingino.release.get
+          delay: 1h
+          history: '0'
+          value_type: TEXT
+          description: 'Contents of /etc/os-release from the web UI info page (`/x/info.cgi?name=release`), parsed into JSON.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  function b64text(b64) {
+                      var buf = atob(b64 || ''), out = '';
+                      if (typeof buf === 'string') {
+                          return buf;
+                      }
+                      for (var i = 0; i < buf.length; i++) {
+                          out += String.fromCharCode(buf[i]);
+                      }
+                      return out;
+                  }
+                  var data = JSON.parse(value);
+                  var cmds = data.commands || [];
+                  var out = {};
+                  for (var i = 0; i < cmds.length; i++) {
+                      if (!/os-release/.test(String(cmds[i].command))) {
+                          continue;
+                      }
+                      var lines = b64text(cmds[i].output_base64).split('\n');
+                      for (var j = 0; j < lines.length; j++) {
+                          var m = lines[j].match(/^([A-Z0-9_]+)=(.*)$/);
+                          if (m) {
+                              var v = m[2].replace(/^\s+|\s+$/g, '');
+                              if (v.length > 1 && v.charAt(0) === '"' && v.charAt(v.length - 1) === '"') {
+                                  v = v.substring(1, v.length - 1);
+                              }
+                              out[m[1]] = v;
+                          }
+                      }
+                  }
+                  if (!out.ID) {
+                      throw 'Unexpected os-release output.';
+                  }
+                  out.FIRMWARE_VERSION = out.BUILD_ID || out.COMMIT_ID || out.VERSION_ID || null;
+                  return JSON.stringify(out);
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/info.cgi'
+          query_fields:
+            - name: name
+              value: release
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 24a0faf6f0a24b5c92aef3e1fb0de694
+          name: 'Get device info'
+          type: HTTP_AGENT
+          key: thingino.device.get
+          delay: 1h
+          history: '0'
+          value_type: TEXT
+          description: 'Device identity from the Thingino camera agent (`/api/v1/device`): camera ID and hostname.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/agent.cgi'
+          query_fields:
+            - name: agent_path
+              value: /api/v1/device
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: b5860cf79ed6462592056bac34c2f108
+          name: 'Get sensor info'
+          type: HTTP_AGENT
+          key: thingino.sensor.get
+          delay: 1h
+          history: '0'
+          value_type: TEXT
+          description: 'Image sensor and SoC model from `/x/json-sensor-info.cgi`.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/json-sensor-info.cgi'
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+        - uuid: 158fef95d2d04f61858b085d37268d19
+          name: 'Get streamer state'
+          type: HTTP_AGENT
+          key: thingino.streamer.get
+          delay: '{$THINGINO.INTERVAL}'
+          history: '0'
+          value_type: TEXT
+          description: 'Read-only query of the prudynt streamer JSON API (`/x/json-prudynt.cgi`): stream settings, live stream statistics, MP4 recorder state and motion detection. All values in the request are null, so nothing is changed. Cameras with the raptor or timps streamer do not have this endpoint.'
+          preprocessing:
+            - type: CHECK_NOT_SUPPORTED
+              parameters:
+                - '-1'
+              error_handler: DISCARD_VALUE
+          timeout: 15s
+          url: '{$THINGINO.SCHEME}://{HOST.CONN}:{$THINGINO.PORT}/x/json-prudynt.cgi'
+          headers:
+            - name: X-API-Key
+              value: '{$THINGINO.API.KEY}'
+            - name: Accept
+              value: application/json
+          tags:
+            - tag: component
+              value: raw
+          posts: '{"stream0":{"enabled":null,"audio_enabled":null,"rtsp_endpoint":null,"format":null,"mode":null,"fps":null,"width":null,"height":null,"bitrate":null,"stats":null},"stream1":{"enabled":null,"audio_enabled":null,"rtsp_endpoint":null,"format":null,"mode":null,"fps":null,"width":null,"height":null,"bitrate":null,"stats":null},"motion":{"enabled":null},"mp4":{"status":null}}'
+          post_type: JSON
+          request_method: POST
+        - uuid: c8649727ffa649608d36fc7c298f6244
+          name: 'API: Status'
+          type: DEPENDENT
+          key: thingino.api.status
+          description: 'Result of the last runtime data request: 0 - camera unreachable, 1 - OK, 2 - authentication failed, 3 - camera agent error, 4 - unexpected response, 5 - agent.cgi sends a malformed HTTP status line (firmware without the 2026-08-16 fix, including the ciao release branch).'
+          valuemap:
+            name: 'Thingino API status'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var text = String(value);
+                  if (text.indexOf('ZBX_ERROR:') === 0) {
+                      // agent.cgi without the upstream fix sends "HTTP/1.1 200 OK\r\r\n", which libcurl rejects.
+                      return /carriage return found in header/i.test(text) ? 5 : 0;
+                  }
+                  var data;
+                  try {
+                      data = JSON.parse(text);
+                  }
+                  catch (e) {
+                      return 4;
+                  }
+                  if (data === null || typeof data !== 'object') {
+                      return 4;
+                  }
+                  if (typeof data.error !== 'undefined') {
+                      var message = (typeof data.error === 'string') ? data.error : JSON.stringify(data.error);
+                      return /authentication required/i.test(message) ? 2 : 3;
+                  }
+                  return (typeof data.system === 'object' && data.system !== null) ? 1 : 4;
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: health
+          triggers:
+            - uuid: 985b542c602d4bf48bc553f77e2f9922
+              expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+              name: 'Thingino: Camera is unreachable'
+              event_name: 'Thingino: Camera is unreachable (for {$THINGINO.UNAVAILABLE.PERIOD})'
+              priority: AVERAGE
+              description: 'The camera web server has not answered for {$THINGINO.UNAVAILABLE.PERIOD}. The camera may be powered off, offline or overloaded. The item "API: Error message" contains the last transport error.'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: b029b194138b4f32be0f3d3ad52bd6f6
+              expression: 'last(/Thingino camera by HTTP/thingino.api.status)=2'
+              name: 'Thingino: API authentication failed'
+              priority: AVERAGE
+              description: 'The camera rejected the request with "401 Authentication required". Generate an API key on the camera (Settings > Web Interface > API Access) and put it into the {$THINGINO.API.KEY} macro, or add the Zabbix server/proxy address to "Trusted IPs (skip login)" on the same page.'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'Thingino: Camera is unreachable'
+                  expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 63f2d9fe411745f08b81a75881f09f4c
+              expression: 'min(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=3 and max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=3'
+              name: 'Thingino: Camera agent is not responding'
+              priority: AVERAGE
+              description: 'The web server answers, but the Thingino camera agent (agentd, port 1998 on the camera) returns errors for {$THINGINO.UNAVAILABLE.PERIOD}. Check "/etc/init.d/S95agent status" on the camera.'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'Thingino: Camera is unreachable'
+                  expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 37c9c09797074d05856fac5f5a7b36a0
+              expression: 'last(/Thingino camera by HTTP/thingino.api.status)=4'
+              name: 'Thingino: Unexpected API response'
+              priority: WARNING
+              description: 'The camera returned a response that is not Thingino agent JSON. The firmware may be too old (no camera agent) or another device answers on {HOST.CONN}:{$THINGINO.PORT}. See the "API: Error message" item.'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'Thingino: Camera is unreachable'
+                  expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 31c372496fdc4cc3965d52ead9026af9
+              expression: 'last(/Thingino camera by HTTP/thingino.api.status)=5'
+              name: 'Thingino: Camera agent API unavailable (agent.cgi header bug)'
+              priority: INFO
+              description: 'The camera answers /x/agent.cgi requests with "HTTP/1.1 200 OK\r\r\n" (an extra carriage return). libcurl, used by Zabbix, rejects it with "Carriage return found in header"; browsers ignore it, so the web UI still works. The bug was fixed in Thingino master on 2026-08-16 (commit ff589846), but the "ciao" release branch (e.g. firmware-2026-11-05) still has it. Everything that has another source is collected anyway; only these items stay empty: stream health and RTSP listener, storage mount state, recording autostart, motion detected, network, day/night target mode, pending upgrade, hostname and camera ID. Fix (over SSH on the camera): sed -i ''s|text="Bad Gateway"; printf|text="Bad Gateway"; sub(/\\r$/, "", text); printf|'' /var/www/x/agent.cgi - the change is stored in the overlay and survives reboots. After installing a firmware that contains the fix, restore the stock file with: cp /rom/var/www/x/agent.cgi /var/www/x/agent.cgi'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: 7952c48a18c342a4adb5ade710dfcddb
+          name: 'API: Error message'
+          type: DEPENDENT
+          key: thingino.api.error
+          value_type: CHAR
+          description: 'Transport or API error of the last runtime data request, "OK" when the request succeeded.'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var text = String(value);
+                  if (text.indexOf('ZBX_ERROR:') === 0) {
+                      return text.substring(10).trim() || 'Unknown error';
+                  }
+                  var data;
+                  try {
+                      data = JSON.parse(text);
+                  }
+                  catch (e) {
+                      return ('Unexpected response: ' + text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim()).substring(0, 250);
+                  }
+                  if (data !== null && typeof data === 'object') {
+                      if (typeof data.error === 'string') {
+                          return data.error.substring(0, 250);
+                      }
+                      if (data.error && data.error.message) {
+                          return String(data.error.message).substring(0, 250);
+                      }
+                      if (typeof data.error !== 'undefined') {
+                          return JSON.stringify(data.error).substring(0, 250);
+                      }
+                      if (typeof data.system === 'object' && data.system !== null) {
+                          return 'OK';
+                      }
+                  }
+                  return ('Unexpected response: ' + text).substring(0, 250);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: health
+        - uuid: c4fc8661794b49c2a666b0d284a49acb
+          name: 'System: Uptime'
+          type: DEPENDENT
+          key: thingino.system.uptime
+          units: uptime
+          description: 'Time since the camera was booted.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.uptime
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: 99acdccdef5d4468adabd72e8db98adf
+              expression: 'nodata(/Thingino camera by HTTP/thingino.system.uptime,{$THINGINO.NODATA.TIMEOUT})=1'
+              name: 'Thingino: No data received'
+              event_name: 'Thingino: No data received (for {$THINGINO.NODATA.TIMEOUT})'
+              priority: WARNING
+              description: 'No runtime data has been received for {$THINGINO.NODATA.TIMEOUT}.'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'Thingino: Camera is unreachable'
+                  expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+                - name: 'Thingino: API authentication failed'
+                  expression: 'last(/Thingino camera by HTTP/thingino.api.status)=2'
+                - name: 'Thingino: Camera agent is not responding'
+                  expression: 'min(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=3 and max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=3'
+                - name: 'Thingino: Unexpected API response'
+                  expression: 'last(/Thingino camera by HTTP/thingino.api.status)=4'
+                - name: 'Thingino: Camera agent API unavailable (agent.cgi header bug)'
+                  expression: 'last(/Thingino camera by HTTP/thingino.api.status)=5'
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: dcb67266fcec46ef90bfceef7b107a0d
+              expression: 'last(/Thingino camera by HTTP/thingino.system.uptime)<10m'
+              name: 'Thingino: Camera has been restarted'
+              event_name: 'Thingino: Camera has been restarted (uptime < 10m)'
+              priority: WARNING
+              description: 'The camera uptime is less than 10 minutes.'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'Thingino: No data received'
+                  expression: 'nodata(/Thingino camera by HTTP/thingino.system.uptime,{$THINGINO.NODATA.TIMEOUT})=1'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: 12c5d521c5af4748b417370c4bc48455
+          name: 'System: Local time'
+          type: DEPENDENT
+          key: thingino.system.localtime
+          units: unixtime
+          description: 'Camera clock (Unix time) at the moment of the heartbeat request.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.time_now
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: system
+          triggers:
+            - uuid: e9fbb870e5f2446a900b43f7af0733ea
+              expression: 'fuzzytime(/Thingino camera by HTTP/thingino.system.localtime,{$THINGINO.TIME.DIFF.MAX})=0'
+              name: 'Thingino: Camera clock is out of sync'
+              event_name: 'Thingino: Camera clock is out of sync (diff with Zabbix > {$THINGINO.TIME.DIFF.MAX})'
+              priority: WARNING
+              description: 'The camera clock differs from the Zabbix server/proxy clock by more than {$THINGINO.TIME.DIFF.MAX}. Recording file names and OSD timestamps will be wrong. Check NTP settings (Settings > Time).'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: 709a96f5d6e14e7fa809e1bf9520a663
+          name: 'System: Load average (1m avg)'
+          type: DEPENDENT
+          key: 'thingino.system.load[avg1]'
+          value_type: FLOAT
+          description: 'Load average over the last 1m.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.load.avg1
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.status.get
+          tags:
+            - tag: component
+              value: cpu
+        - uuid: deb12599be2148e88cb317fec76142aa
+          name: 'System: Load average (5m avg)'
+          type: DEPENDENT
+          key: 'thingino.system.load[avg5]'
+          value_type: FLOAT
+          description: 'Load average over the last 5m.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.load.avg5
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.status.get
+          tags:
+            - tag: component
+              value: cpu
+          triggers:
+            - uuid: ae0d117d9c28406d85895c8542b5c211
+              expression: 'min(/Thingino camera by HTTP/thingino.system.load[avg5],15m)>{$THINGINO.LOAD.AVG.MAX}'
+              name: 'Thingino: High load average'
+              event_name: 'Thingino: High load average (over {$THINGINO.LOAD.AVG.MAX} for 15m)'
+              opdata: 'Load averages(1m, 5m, 15m): ({ITEM.LASTVALUE1})'
+              priority: WARNING
+              description: 'The 5-minute load average has been above {$THINGINO.LOAD.AVG.MAX} for 15 minutes.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: performance
+        - uuid: 87c4f87e28854fd4b53f7908da1cd903
+          name: 'System: Load average (15m avg)'
+          type: DEPENDENT
+          key: 'thingino.system.load[avg15]'
+          value_type: FLOAT
+          description: 'Load average over the last 15m.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.load.avg15
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.status.get
+          tags:
+            - tag: component
+              value: cpu
+        - uuid: 680ede43b0ee42c1af0012f5b437df22
+          name: 'Memory: Total'
+          type: DEPENDENT
+          key: thingino.memory.total
+          units: B
+          description: 'Total RAM available to Linux (memory reserved for the video pipeline is not included).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.memory.total
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: memory
+        - uuid: 3bbfc4cdaf964a85938686c26dfb985a
+          name: 'Memory: Available'
+          type: DEPENDENT
+          key: thingino.memory.available
+          units: B
+          description: 'Free memory plus buffers and page cache.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.memory
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var m = JSON.parse(value);
+                  if (!m.total || typeof m.free !== 'number') {
+                      return 'null';
+                  }
+                  // Same fallback the camera agent uses when MemAvailable is missing (kernel 3.10 on T10/T20/T30).
+                  var available = m.free + (m.buffers || 0) + (m.cached || 0);
+                  return available * 1024;
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: memory
+        - uuid: cb6c442f2d034f6d996ad67dad7533ae
+          name: 'Memory: Used'
+          type: DEPENDENT
+          key: thingino.memory.used
+          units: B
+          description: 'Used memory (total minus available).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.memory
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var m = JSON.parse(value);
+                  if (!m.total || typeof m.free !== 'number') {
+                      return 'null';
+                  }
+                  // Same fallback the camera agent uses when MemAvailable is missing (kernel 3.10 on T10/T20/T30).
+                  var available = m.free + (m.buffers || 0) + (m.cached || 0);
+                  return Math.max(m.total - available, 0) * 1024;
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: memory
+        - uuid: 78f96f1f57fb43648f75666fc5073141
+          name: 'Memory: Utilization'
+          type: DEPENDENT
+          key: thingino.memory.pused
+          value_type: FLOAT
+          units: '%'
+          description: 'Used memory in percent of total.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.memory
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var m = JSON.parse(value);
+                  if (!m.total || typeof m.free !== 'number') {
+                      return 'null';
+                  }
+                  // Same fallback the camera agent uses when MemAvailable is missing (kernel 3.10 on T10/T20/T30).
+                  var available = m.free + (m.buffers || 0) + (m.cached || 0);
+                  return (Math.max(m.total - available, 0) / m.total * 100).toFixed(2);
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: memory
+          triggers:
+            - uuid: 377885284b4142739728f84b7c51fab3
+              expression: 'min(/Thingino camera by HTTP/thingino.memory.pused,15m)>{$THINGINO.MEMORY.UTIL.MAX}'
+              name: 'Thingino: High memory utilization'
+              event_name: 'Thingino: High memory utilization (>{$THINGINO.MEMORY.UTIL.MAX}% for 15m)'
+              opdata: 'Current utilization: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'Memory utilization has been above {$THINGINO.MEMORY.UTIL.MAX}% for 15 minutes. The streamer may be killed by the OOM killer.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: d1f1992330c54ca6b449801ebd4be343
+          name: 'Overlay: Total size'
+          type: DEPENDENT
+          key: thingino.overlay.total
+          units: B
+          description: 'Total size of the overlay partition (writable flash storage for settings).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.overlay.total
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: overlay
+        - uuid: 9bbf8b7fe0c84208822ab83822d498f4
+          name: 'Overlay: Used space'
+          type: DEPENDENT
+          key: thingino.overlay.used
+          units: B
+          description: 'Used space of the overlay partition (writable flash storage for settings).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.overlay.used
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: overlay
+        - uuid: 4aede4f8bea2492db950e3bff1c0da87
+          name: 'Overlay: Free space'
+          type: DEPENDENT
+          key: thingino.overlay.free
+          units: B
+          description: 'Free space of the overlay partition (writable flash storage for settings).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.overlay.free
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+            - type: MULTIPLIER
+              parameters:
+                - '1024'
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: overlay
+        - uuid: c17e8bbc44e6477f8dc0fe89a7a59ae7
+          name: 'Overlay: Space utilization'
+          type: DEPENDENT
+          key: thingino.overlay.pused
+          value_type: FLOAT
+          units: '%'
+          description: 'Used space of the overlay partition in percent.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.data.overlay
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var o = JSON.parse(value);
+                  if (!o.total || typeof o.used !== 'number') {
+                      return 'null';
+                  }
+                  return (o.used / o.total * 100).toFixed(2);
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.usage.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: overlay
+          triggers:
+            - uuid: a3902eb083f744c3985b8009c36e8dac
+              expression: 'min(/Thingino camera by HTTP/thingino.overlay.pused,15m)>{$THINGINO.OVERLAY.PUSED.MAX.CRIT}'
+              name: 'Thingino: Overlay is almost full'
+              event_name: 'Thingino: Overlay is almost full (used > {$THINGINO.OVERLAY.PUSED.MAX.CRIT}%)'
+              opdata: 'Space used: {ITEM.LASTVALUE1}'
+              priority: HIGH
+              description: 'The writable flash partition is more than {$THINGINO.OVERLAY.PUSED.MAX.CRIT}% full. Settings may fail to save. Remove unneeded files (Tools > File Manager, /overlay).'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: capacity
+            - uuid: 87f110ee80ef4c7fa72b0557c36807b5
+              expression: 'min(/Thingino camera by HTTP/thingino.overlay.pused,15m)>{$THINGINO.OVERLAY.PUSED.MAX.WARN}'
+              name: 'Thingino: Overlay space is low'
+              event_name: 'Thingino: Overlay space is low (used > {$THINGINO.OVERLAY.PUSED.MAX.WARN}%)'
+              opdata: 'Space used: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'The writable flash partition is more than {$THINGINO.OVERLAY.PUSED.MAX.WARN}% full.'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'Thingino: Overlay is almost full'
+                  expression: 'min(/Thingino camera by HTTP/thingino.overlay.pused,15m)>{$THINGINO.OVERLAY.PUSED.MAX.CRIT}'
+              tags:
+                - tag: scope
+                  value: capacity
+        - uuid: 69406eb58d3e4eb080c8d62cf92e48e2
+          name: 'Network: IP address'
+          type: DEPENDENT
+          key: thingino.network.ip
+          value_type: CHAR
+          description: 'Primary IPv4 address of the camera.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.network.ip
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^(null)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: network
+        - uuid: 2d79818b885e4881a818e124227efb01
+          name: 'Network: Online'
+          type: DEPENDENT
+          key: thingino.network.online
+          description: 'The camera has a non-loopback IPv4 address.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.network.online
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: network
+        - uuid: e2fa7b4334114dea83f0da5c368f155b
+          name: 'WireGuard: Tunnel status'
+          type: DEPENDENT
+          key: thingino.wireguard.status
+          description: 'State of the wg0 WireGuard interface (always "Down" if WireGuard is not used).'
+          valuemap:
+            name: 'Thingino up/down'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.wg_status
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: network
+        - uuid: 419d224666d54a5c9d3ab31e96a32959
+          name: 'Firmware: Version'
+          type: DEPENDENT
+          key: thingino.firmware.version
+          value_type: CHAR
+          description: 'Thingino firmware build (BUILD_ID from /etc/os-release).'
+          inventory_link: OS
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.FIRMWARE_VERSION
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^(null)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.release.get
+          tags:
+            - tag: component
+              value: os
+          triggers:
+            - uuid: 596704034aa147ebaed692726ea411c5
+              expression: 'last(/Thingino camera by HTTP/thingino.firmware.version,#1)<>last(/Thingino camera by HTTP/thingino.firmware.version,#2) and length(last(/Thingino camera by HTTP/thingino.firmware.version))>0'
+              name: 'Thingino: Firmware version has changed'
+              event_name: 'Thingino: Firmware version has changed (new version: {ITEM.VALUE})'
+              priority: INFO
+              description: 'The Thingino firmware build has changed. Acknowledge to close the problem manually.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
+        - uuid: c46b08ab36d74f3eaf7eec3357e7df7f
+          name: 'Firmware: Pending upgrade'
+          type: DEPENDENT
+          key: thingino.firmware.pending
+          value_type: CHAR
+          description: 'Staged firmware upgrade waiting for reboot: none, partial or full.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.firmware.pending_action
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: os
+        - uuid: ae724e6642594f13a6888efccaa2242a
+          name: 'Device: Camera ID'
+          type: DEPENDENT
+          key: thingino.device.id
+          value_type: CHAR
+          description: 'Camera identifier (primary MAC address without separators).'
+          inventory_link: MACADDRESS_A
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.id
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.device.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 53466c2c727540a89df55ea7464da580
+          name: 'Device: Hostname'
+          type: DEPENDENT
+          key: thingino.device.hostname
+          value_type: CHAR
+          description: 'Camera hostname.'
+          inventory_link: NAME
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.hostname
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.device.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 1b45703dff1c42f187587ec9790e9955
+          name: 'Firmware: Build time'
+          type: DEPENDENT
+          key: thingino.firmware.buildtime
+          units: unixtime
+          description: 'Time the firmware image was built (BUILD_TIMESTAMP from /etc/os-release).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.BUILD_TIMESTAMP
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.release.get
+          tags:
+            - tag: component
+              value: os
+        - uuid: bdfcf0327833467cbc7242edb9a8295a
+          name: 'Device: Model'
+          type: DEPENDENT
+          key: thingino.device.model
+          value_type: CHAR
+          description: 'Camera model / firmware profile (IMAGE_ID from /etc/os-release).'
+          inventory_link: MODEL
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.IMAGE_ID
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^(null)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.release.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 99d77c2781dd4045861f9b4ab6a4960f
+          name: 'Device: Streamer'
+          type: DEPENDENT
+          key: thingino.device.streamer
+          value_type: CHAR
+          description: 'Video streamer backend found in the process list: prudynt, raptor or timps.'
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.streamer
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^(null)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.processes.get
+          tags:
+            - tag: component
+              value: streaming
+        - uuid: 93cf058f0b0b4bb982616ccd99e5b976
+          name: 'Hardware: SoC model'
+          type: DEPENDENT
+          key: thingino.hw.soc
+          value_type: CHAR
+          description: 'Ingenic SoC model.'
+          inventory_link: HARDWARE
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.soc_model
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.sensor.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 6dc48b49b19441929633ccff0c5cc019
+          name: 'Hardware: Image sensor'
+          type: DEPENDENT
+          key: thingino.hw.sensor
+          value_type: CHAR
+          description: 'Image sensor model.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.sensor_model
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.sensor.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: ea905159f66f409fb146fcb09f089d21
+          name: 'Streamer: Running'
+          type: DEPENDENT
+          key: thingino.streamer.running
+          description: 'A video streamer process (prudynt, rvd or timpsd) is in the process list.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.streamer_running
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.processes.get
+          tags:
+            - tag: component
+              value: streaming
+          triggers:
+            - uuid: 0f718650a9934be4a10b3df82c10684b
+              expression: 'max(/Thingino camera by HTTP/thingino.streamer.running,{$THINGINO.STREAMER.DOWN.PERIOD})=0'
+              name: 'Thingino: Streamer is not running'
+              event_name: 'Thingino: Streamer is not running (for {$THINGINO.STREAMER.DOWN.PERIOD})'
+              priority: HIGH
+              description: 'The video streamer process (prudynt/raptor/timps) has not been running for {$THINGINO.STREAMER.DOWN.PERIOD}: no RTSP video, no recording, no motion detection.'
+              dependencies:
+                - name: 'Thingino: Camera is unreachable'
+                  expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+              tags:
+                - tag: scope
+                  value: availability
+        - uuid: 4368e43386b743f3a3a6dc4bc91908c3
+          name: 'System: Number of processes'
+          type: DEPENDENT
+          key: thingino.system.procs
+          description: 'Number of processes in the process list.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.processes
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.processes.get
+          tags:
+            - tag: component
+              value: system
+        - uuid: 14fc55a2b9f64fe8907c00b58d677e90
+          name: 'Day/night: Automatic switching'
+          type: DEPENDENT
+          key: thingino.daynight.auto
+          description: 'Automatic day/night switching is enabled.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.daynight_enabled
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: 5b8675895c1b4a87aa7354c70d1d7561
+          name: 'Day/night: Target mode'
+          type: DEPENDENT
+          key: thingino.daynight.target
+          value_type: CHAR
+          description: 'Configured day/night mode: auto, day or night.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.daynight.target_mode
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^(null)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: 41a8ae9bd93446b2a30e2c90459e51d0
+          name: 'Day/night: Current mode'
+          type: DEPENDENT
+          key: thingino.daynight.mode
+          description: 'Day/night mode the camera is currently in.'
+          valuemap:
+            name: 'Thingino day/night mode'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.daynight_mode
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  switch (String(value).toLowerCase()) {
+                      case 'night':
+                          return 0;
+                      case 'day':
+                          return 1;
+                      default:
+                          return 2;
+                  }
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: 6c808afee32f480b91b800c47133aaaf
+          name: 'Day/night: Ambient brightness'
+          type: DEPENDENT
+          key: thingino.daynight.brightness
+          value_type: FLOAT
+          description: 'Ambient brightness used for day/night decisions. With daynightd it is a percentage; with the raptor backend (RIC) it is the AE luma value.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.daynight_brightness
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: 6f0647ccb8154fda8d34c9ce0d0b3e78
+          name: 'Day/night: Sensor gain'
+          type: DEPENDENT
+          key: thingino.daynight.gain
+          value_type: FLOAT
+          description: 'ISP total gain (or brightness percent reported by daynightd, depending on the backend). Higher values mean darker scenes.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.total_gain
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: e84c5db6f42b45fba08527a82f303979
+          name: 'Image: Color mode'
+          type: DEPENDENT
+          key: thingino.image.colormode
+          description: 'ISP running mode: color (day) or black & white (night).'
+          valuemap:
+            name: 'Thingino color mode'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.color_mode
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: 98606106ebef4a3d841ebb0b84461adc
+          name: 'IR-cut filter: State'
+          type: DEPENDENT
+          key: thingino.ircut.state
+          description: 'IR-cut filter position (no data if the camera has no controllable IR-cut filter).'
+          valuemap:
+            name: 'Thingino IR-cut filter'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.ircut_state
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: da34dafe9d214f3486cb59746f5eecba
+          name: 'IR LED 850 nm: State'
+          type: DEPENDENT
+          key: 'thingino.light.state[ir850]'
+          description: 'IR LED 850 nm state (no data if the camera has no such light).'
+          valuemap:
+            name: 'Thingino on/off'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.ir850_state
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: b11db20521844885acc6422365997570
+          name: 'IR LED 940 nm: State'
+          type: DEPENDENT
+          key: 'thingino.light.state[ir940]'
+          description: 'IR LED 940 nm state (no data if the camera has no such light).'
+          valuemap:
+            name: 'Thingino on/off'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.ir940_state
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: 27fb9ca5781d4a77afc9737dec6699ca
+          name: 'White LED: State'
+          type: DEPENDENT
+          key: 'thingino.light.state[white]'
+          description: 'White LED state (no data if the camera has no such light).'
+          valuemap:
+            name: 'Thingino on/off'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.white_state
+              error_handler: DISCARD_VALUE
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: daynight
+        - uuid: 0186a0f13d474e8d8a4598b3d0b0d96c
+          name: 'Audio: Microphone'
+          type: DEPENDENT
+          key: thingino.audio.mic
+          description: 'Microphone (audio input) is enabled.'
+          valuemap:
+            name: 'Thingino on/off'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.mic_enabled
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: audio
+        - uuid: ad39c207db97486aa45642b60125c932
+          name: 'Audio: Speaker'
+          type: DEPENDENT
+          key: thingino.audio.speaker
+          description: 'Speaker (audio output) is enabled.'
+          valuemap:
+            name: 'Thingino on/off'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.spk_enabled
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: audio
+        - uuid: 15fc7c18f0fb42df8b4f3732b8423585
+          name: 'Motion detection: Enabled'
+          type: DEPENDENT
+          key: thingino.motion.enabled
+          description: 'Motion detection is enabled.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.motion.enabled
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.streamer.get
+          tags:
+            - tag: component
+              value: motion
+        - uuid: 2260d4623c414cab9bbdd16bd23842f7
+          name: 'Motion detection: Motion detected'
+          type: DEPENDENT
+          key: thingino.motion.active
+          description: 'Motion is being detected at the moment of polling (instantaneous state).'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.motion.active
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: motion
+        - uuid: 1ae751643b6e4bc9ae7202bb17445b23
+          name: 'Privacy mode: Enabled'
+          type: DEPENDENT
+          key: thingino.privacy.enabled
+          description: 'Privacy mode masks the video image.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.privacy_enabled
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: security
+          triggers:
+            - uuid: a3ddd007925f43879b22dee93b200f02
+              expression: 'last(/Thingino camera by HTTP/thingino.privacy.enabled)=1'
+              name: 'Thingino: Privacy mode is enabled'
+              priority: INFO
+              description: 'Privacy mode is on: the video is masked and the camera does not show the scene.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: security
+        - uuid: 164e2fe6dd1f431ea4d239752e8609cc
+          name: 'Storage: Mount point'
+          type: DEPENDENT
+          key: thingino.storage.mountpoint
+          value_type: CHAR
+          description: 'Configured recording storage mount point.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.storage.configured_mount
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^(null)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: recording
+        - uuid: ab5945a0df3649b8975d1391d270318a
+          name: 'Storage: Filesystem'
+          type: DEPENDENT
+          key: thingino.storage.fs
+          value_type: CHAR
+          description: 'Filesystem type of the mounted recording storage.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.storage.filesystem
+              error_handler: DISCARD_VALUE
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - '^(null)?$'
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: recording
+        - uuid: 04268f71c8014ec19b0587e0719b67cd
+          name: 'Storage: Mounted'
+          type: DEPENDENT
+          key: thingino.storage.mounted
+          description: 'The configured recording storage is mounted.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.storage.mounted
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: recording
+        - uuid: a72a18046b894f11a10bed049cb36bc6
+          name: 'Storage: Writable'
+          type: DEPENDENT
+          key: thingino.storage.writable
+          description: 'The recording storage mount point is writable.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.storage.writable
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: storage
+            - tag: storage
+              value: recording
+        - uuid: 0bca23c7606e46d0b61adb54966501cc
+          name: 'Recording: Autostart'
+          type: DEPENDENT
+          key: thingino.recording.autostart
+          description: 'Continuous recording is configured to start automatically.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.recording.configured_autostart
+              error_handler: DISCARD_VALUE
+            - type: BOOL_TO_DECIMAL
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+          master_item:
+            key: thingino.runtime.get
+          tags:
+            - tag: component
+              value: recording
+        - uuid: 3f4bae84c9674507a67b30f140490b26
+          name: 'Recording: Active'
+          type: DEPENDENT
+          key: thingino.recording.active
+          description: 'A recording is in progress.'
+          valuemap:
+            name: 'Thingino yes/no'
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var h;
+                  try {
+                      h = JSON.parse(value);
+                  }
+                  catch (e) {
+                      return 'null';
+                  }
+                  if (h === null || typeof h !== 'object') {
+                      return 'null';
+                  }
+                  function on(v) {
+                      return v === true || v === 1 || v === '1' || v === 'true';
+                  }
+                  if (typeof h.rec_ch0 === 'undefined' && typeof h.rec_ch1 === 'undefined') {
+                      return 'null';
+                  }
+                  return (on(h.rec_ch0) || on(h.rec_ch1)) ? 1 : 0;
+            - type: MATCHES_REGEX
+              parameters:
+                - '^[01]$'
+              error_handler: DISCARD_VALUE
+          master_item:
+            key: thingino.heartbeat.get
+          tags:
+            - tag: component
+              value: recording
+      discovery_rules:
+        - uuid: 66b26a5eb841433d9b028854532cf6cb
+          name: 'Video stream discovery'
+          type: DEPENDENT
+          key: thingino.stream.discovery
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#STREAM.ID}'
+                value: '{$THINGINO.LLD.FILTER.STREAM.MATCHES}'
+              - macro: '{#STREAM.ID}'
+                value: '{$THINGINO.LLD.FILTER.STREAM.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+          description: 'Discovers the main (0) and substream (1) video encoders of the prudynt streamer. Settings, live statistics and recording state come from /x/json-prudynt.cgi; health and RTSP listener state come from the camera agent. Cameras with the raptor or timps streamer have no streams discovered.'
+          item_prototypes:
+            - uuid: 7e3098fa66b94283a41ba0145c6c690c
+              name: 'Stream [{#STREAM.ID}]: Enabled'
+              type: DEPENDENT
+              key: 'thingino.stream.enabled[{#STREAM.ID}]'
+              description: 'Stream {#STREAM.ID} (RTSP endpoint "{#STREAM.ENDPOINT}") is enabled.'
+              valuemap:
+                name: 'Thingino yes/no'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.enabled'
+                  error_handler: DISCARD_VALUE
+                - type: BOOL_TO_DECIMAL
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: 0760288ae94646fd98e6b7ff6ed5fbee
+              name: 'Stream [{#STREAM.ID}]: Healthy'
+              type: DEPENDENT
+              key: 'thingino.stream.healthy[{#STREAM.ID}]'
+              description: 'The streamer is running, the stream and its video are enabled and the RTSP listener is up. Reported by the camera agent (needs a working /x/agent.cgi).'
+              valuemap:
+                name: 'Thingino health'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.streams[?(@.id == {#STREAM.ID})].healthy.first()'
+                  error_handler: DISCARD_VALUE
+                - type: BOOL_TO_DECIMAL
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: thingino.runtime.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: 1e68c164ba574c8c88e58d4f5d998af2
+              name: 'Stream [{#STREAM.ID}]: RTSP listener'
+              type: DEPENDENT
+              key: 'thingino.stream.rtsp[{#STREAM.ID}]'
+              description: 'The RTSP server port is listening. Reported by the camera agent (needs a working /x/agent.cgi).'
+              valuemap:
+                name: 'Thingino up/down'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.streams[?(@.id == {#STREAM.ID})].rtsp_listener_up.first()'
+                  error_handler: DISCARD_VALUE
+                - type: BOOL_TO_DECIMAL
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: thingino.runtime.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: 6279ba5533e347749dcba3ca3ae8d7dc
+              name: 'Stream [{#STREAM.ID}]: Recording'
+              type: DEPENDENT
+              key: 'thingino.stream.recording[{#STREAM.ID}]'
+              description: 'The MP4 recorder of this stream is active.'
+              valuemap:
+                name: 'Thingino yes/no'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.mp4.status.ch{#STREAM.ID}'
+                  error_handler: DISCARD_VALUE
+                - type: BOOL_TO_DECIMAL
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: recording
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: daeaa6634dda482393f1cf2531401fdf
+              name: 'Stream [{#STREAM.ID}]: Audio'
+              type: DEPENDENT
+              key: 'thingino.stream.audio[{#STREAM.ID}]'
+              description: 'Audio is enabled in the stream.'
+              valuemap:
+                name: 'Thingino on/off'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.audio_enabled'
+                  error_handler: DISCARD_VALUE
+                - type: BOOL_TO_DECIMAL
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1h
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: audio
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: 0e0b74ee8a9a4c32aaf5efcc596caef6
+              name: 'Stream [{#STREAM.ID}]: Resolution'
+              type: DEPENDENT
+              key: 'thingino.stream.resolution[{#STREAM.ID}]'
+              value_type: CHAR
+              description: 'Configured video resolution (width x height).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}'
+                  error_handler: DISCARD_VALUE
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var s = JSON.parse(value);
+                      if (!s.width || !s.height) {
+                          return 'null';
+                      }
+                      return s.width + 'x' + s.height;
+                - type: NOT_MATCHES_REGEX
+                  parameters:
+                    - '^(null)?$'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: 8f018f9864f1482797f47127b32cd775
+              name: 'Stream [{#STREAM.ID}]: Configured frame rate'
+              type: DEPENDENT
+              key: 'thingino.stream.fps[{#STREAM.ID}]'
+              units: fps
+              description: 'Configured frame rate.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.fps'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: 6b57621d3444456c8637db15604aea14
+              name: 'Stream [{#STREAM.ID}]: Configured bitrate'
+              type: DEPENDENT
+              key: 'thingino.stream.bitrate[{#STREAM.ID}]'
+              units: bps
+              description: 'Configured target bitrate (kbps in the camera settings).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.bitrate'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+                - type: MULTIPLIER
+                  parameters:
+                    - '1000'
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: ddc1ad596e344e168a69c34903d95cc9
+              name: 'Stream [{#STREAM.ID}]: Live frame rate'
+              type: DEPENDENT
+              key: 'thingino.stream.livefps[{#STREAM.ID}]'
+              units: fps
+              description: 'Frames per second the encoder produced in the last second. prudynt idles an encoder that nobody consumes (no RTSP client, no recording), so 0 is normal when the stream is not watched.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.stats.fps'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: a3eeb6a7a3c441ecb737297a0a20380b
+              name: 'Stream [{#STREAM.ID}]: Live bitrate'
+              type: DEPENDENT
+              key: 'thingino.stream.livebps[{#STREAM.ID}]'
+              units: bps
+              description: 'Bitrate the encoder produced in the last second (0 when the stream is idle).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.stats.Bps'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+                - type: MULTIPLIER
+                  parameters:
+                    - '8'
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: 44337651a4b2441aa13590c404a7bfe5
+              name: 'Stream [{#STREAM.ID}]: Codec'
+              type: DEPENDENT
+              key: 'thingino.stream.codec[{#STREAM.ID}]'
+              value_type: CHAR
+              description: 'Video codec: H264 or H265.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.format'
+                  error_handler: DISCARD_VALUE
+                - type: NOT_MATCHES_REGEX
+                  parameters:
+                    - '^(null)?$'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+            - uuid: f6c084f52e0b4f0c8a3744991340dfbc
+              name: 'Stream [{#STREAM.ID}]: Rate control'
+              type: DEPENDENT
+              key: 'thingino.stream.mode[{#STREAM.ID}]'
+              value_type: CHAR
+              description: 'Encoder rate control mode (CBR, VBR, SMART, FIXQP, ...).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.stream{#STREAM.ID}.mode'
+                  error_handler: DISCARD_VALUE
+                - type: NOT_MATCHES_REGEX
+                  parameters:
+                    - '^(null)?$'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: thingino.streamer.get
+              tags:
+                - tag: component
+                  value: streaming
+                - tag: stream
+                  value: '{#STREAM.ID}'
+          trigger_prototypes:
+            - uuid: d03aba88b9564025aedb42dde0a0b61b
+              expression: 'last(/Thingino camera by HTTP/thingino.stream.enabled[{#STREAM.ID}])=1 and max(/Thingino camera by HTTP/thingino.stream.healthy[{#STREAM.ID}],{$THINGINO.STREAM.UNHEALTHY.PERIOD})=0'
+              name: 'Thingino: Stream [{#STREAM.ID}] is unhealthy'
+              event_name: 'Thingino: Stream [{#STREAM.ID}] is unhealthy (for {$THINGINO.STREAM.UNHEALTHY.PERIOD})'
+              priority: AVERAGE
+              description: 'Stream {#STREAM.ID} ("{#STREAM.ENDPOINT}") is enabled, but its video is disabled or the RTSP listener is down.'
+              manual_close: 'YES'
+              dependencies:
+                - name: 'Thingino: Streamer is not running'
+                  expression: 'max(/Thingino camera by HTTP/thingino.streamer.running,{$THINGINO.STREAMER.DOWN.PERIOD})=0'
+                - name: 'Thingino: Camera is unreachable'
+                  expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+              tags:
+                - tag: scope
+                  value: availability
+          graph_prototypes:
+            - uuid: 5ccbcd69c99349c1b3e1b74981bef519
+              name: 'Thingino: Stream [{#STREAM.ID}]: Bitrate'
+              graph_items:
+                - drawtype: GRADIENT_LINE
+                  color: 199C0D
+                  item:
+                    host: 'Thingino camera by HTTP'
+                    key: 'thingino.stream.livebps[{#STREAM.ID}]'
+                - sortorder: '1'
+                  drawtype: DASHED_LINE
+                  color: F63100
+                  item:
+                    host: 'Thingino camera by HTTP'
+                    key: 'thingino.stream.bitrate[{#STREAM.ID}]'
+          master_item:
+            key: thingino.streamer.get
+          lld_macro_paths:
+            - lld_macro: '{#STREAM.ENDPOINT}'
+              path: $.endpoint
+            - lld_macro: '{#STREAM.ID}'
+              path: $.id
+          preprocessing:
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var data;
+                  try {
+                      data = JSON.parse(value);
+                  }
+                  catch (e) {
+                      return 'SKIP';
+                  }
+                  if (data === null || typeof data !== 'object') {
+                      return 'SKIP';
+                  }
+                  var out = [];
+                  for (var i = 0; i < 2; i++) {
+                      var st = data['stream' + i];
+                      if (st === null || typeof st !== 'object') {
+                          continue;
+                      }
+                      out.push({id: i, endpoint: st.rtsp_endpoint ? String(st.rtsp_endpoint) : 'unknown'});
+                  }
+                  return out.length ? JSON.stringify(out) : 'SKIP';
+            - type: NOT_MATCHES_REGEX
+              parameters:
+                - ^SKIP$
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+        - uuid: a2ca52ce8666437f95ad4b7a7cf5239b
+          name: 'Filesystem discovery'
+          type: DEPENDENT
+          key: thingino.vfs.discovery
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#FSNAME}'
+                value: '{$THINGINO.VFS.FS.NAME.MATCHES}'
+              - macro: '{#FSNAME}'
+                value: '{$THINGINO.VFS.FS.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+              - macro: '{#FSTYPE}'
+                value: '{$THINGINO.VFS.FS.TYPE.MATCHES}'
+              - macro: '{#FSTYPE}'
+                value: '{$THINGINO.VFS.FS.TYPE.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+          description: 'Discovers mounted data filesystems (SD card, USB storage, NFS/SMB shares) from `df -T`. The overlay flash partition is monitored by the "Overlay:" items.'
+          item_prototypes:
+            - uuid: e3d7825bdc84498d8f3ee10aa737c88a
+              name: 'Filesystem [{#FSNAME}]: Total space'
+              type: DEPENDENT
+              key: 'thingino.vfs.size["{#FSNAME}",total]'
+              units: B
+              description: 'Total space of {#FSNAME} ({#FSTYPE}, {#FSDEVICE}).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.filesystems[?(@.mount == "{#FSNAME}")].total.first()'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: thingino.status.get
+              tags:
+                - tag: component
+                  value: storage
+                - tag: filesystem
+                  value: '{#FSNAME}'
+                - tag: fstype
+                  value: '{#FSTYPE}'
+            - uuid: 92c665b7185d498e9c710f8f3224168c
+              name: 'Filesystem [{#FSNAME}]: Used space'
+              type: DEPENDENT
+              key: 'thingino.vfs.size["{#FSNAME}",used]'
+              units: B
+              description: 'Used space of {#FSNAME} ({#FSTYPE}, {#FSDEVICE}).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.filesystems[?(@.mount == "{#FSNAME}")].used.first()'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: thingino.status.get
+              tags:
+                - tag: component
+                  value: storage
+                - tag: filesystem
+                  value: '{#FSNAME}'
+                - tag: fstype
+                  value: '{#FSTYPE}'
+            - uuid: 86d7dc61175844c1acc81421b6d25a85
+              name: 'Filesystem [{#FSNAME}]: Free space'
+              type: DEPENDENT
+              key: 'thingino.vfs.size["{#FSNAME}",free]'
+              units: B
+              description: 'Free space of {#FSNAME} ({#FSTYPE}, {#FSDEVICE}).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.filesystems[?(@.mount == "{#FSNAME}")].free.first()'
+                  error_handler: DISCARD_VALUE
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: thingino.status.get
+              tags:
+                - tag: component
+                  value: storage
+                - tag: filesystem
+                  value: '{#FSNAME}'
+                - tag: fstype
+                  value: '{#FSTYPE}'
+            - uuid: 267a9b3fd68c4ff68940f5049acf59e0
+              name: 'Filesystem [{#FSNAME}]: Space utilization'
+              type: DEPENDENT
+              key: 'thingino.vfs.size["{#FSNAME}",pused]'
+              value_type: FLOAT
+              units: '%'
+              description: 'Used space of {#FSNAME} in percent (as reported by df).'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$.filesystems[?(@.mount == "{#FSNAME}")].first()'
+                  error_handler: DISCARD_VALUE
+                - type: JAVASCRIPT
+                  parameters:
+                    - |
+                      var f = JSON.parse(value);
+                      if (!f.total || (f.used + f.free) <= 0) {
+                          return 'null';
+                      }
+                      return (f.used / (f.used + f.free) * 100).toFixed(2);
+                - type: MATCHES_REGEX
+                  parameters:
+                    - '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                  error_handler: DISCARD_VALUE
+              master_item:
+                key: thingino.status.get
+              tags:
+                - tag: component
+                  value: storage
+                - tag: filesystem
+                  value: '{#FSNAME}'
+                - tag: fstype
+                  value: '{#FSTYPE}'
+          trigger_prototypes:
+            - uuid: 7026572034f74180af17b276507254c9
+              expression: 'last(/Thingino camera by HTTP/thingino.vfs.size["{#FSNAME}",free])<{$THINGINO.STORAGE.FREE.MIN:"{#FSNAME}"}'
+              name: 'Thingino: Filesystem [{#FSNAME}]: Free space is low'
+              event_name: 'Thingino: Filesystem [{#FSNAME}]: Free space is low (less than {$THINGINO.STORAGE.FREE.MIN:"{#FSNAME}"})'
+              opdata: 'Free: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'Free space on {#FSNAME} is below {$THINGINO.STORAGE.FREE.MIN:"{#FSNAME}"}. The Thingino record manager normally deletes the oldest recordings to keep 500 MB free on the recording storage, so this usually means the cleanup is not working or the card holds other data.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: capacity
+          graph_prototypes:
+            - uuid: c558979ffd1945afb8e4b6909d25aa66
+              name: 'Thingino: Filesystem [{#FSNAME}]: Space usage'
+              type: STACKED
+              graph_items:
+                - color: F63100
+                  item:
+                    host: 'Thingino camera by HTTP'
+                    key: 'thingino.vfs.size["{#FSNAME}",used]'
+                - sortorder: '1'
+                  color: 199C0D
+                  item:
+                    host: 'Thingino camera by HTTP'
+                    key: 'thingino.vfs.size["{#FSNAME}",free]'
+          master_item:
+            key: thingino.status.get
+          lld_macro_paths:
+            - lld_macro: '{#FSDEVICE}'
+              path: $.device
+            - lld_macro: '{#FSNAME}'
+              path: $.mount
+            - lld_macro: '{#FSTYPE}'
+              path: $.type
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - $.filesystems
+              error_handler: DISCARD_VALUE
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var fs = JSON.parse(value);
+                  var out = [];
+                  for (var i = 0; i < fs.length; i++) {
+                      out.push({mount: fs[i].mount, type: fs[i].type, device: fs[i].device});
+                  }
+                  return JSON.stringify(out);
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+      tags:
+        - tag: class
+          value: hardware
+        - tag: subclass
+          value: camera
+        - tag: target
+          value: cctv
+        - tag: target
+          value: thingino
+      macros:
+        - macro: '{$THINGINO.API.KEY}'
+          type: SECRET_TEXT
+          description: 'Camera API key (Settings > Web Interface > API Access > Generate). Sent in the X-API-Key header. Can stay empty if the Zabbix server/proxy address is in "Trusted IPs (skip login)" on the same page.'
+          config:
+            type: TEXT
+            priority: '4'
+            label: 'API key'
+            description: 'API key generated on the camera in *Settings > Web Interface > API Access*. Leave empty only if the Zabbix server or proxy IP is in "Trusted IPs (skip login)" on the same page.'
+        - macro: '{$THINGINO.INTERVAL}'
+          value: 1m
+          description: 'Polling interval of the runtime and heartbeat data.'
+          config:
+            type: TEXT
+            priority: '5'
+            label: 'Polling interval'
+            description: 'Update interval of the main data requests, e.g. 1m. Increase it to reduce the load on slow cameras.'
+            required: 'YES'
+            regex: '^[0-9]+[smhdw]?$'
+        - macro: '{$THINGINO.LLD.FILTER.STREAM.MATCHES}'
+          value: '.*'
+          description: 'Filter of discoverable streams by ID.'
+          config:
+            type: TEXT
+            priority: '15'
+            section_name: Discovery
+            label: 'Streams to include'
+            description: 'Regular expression for stream IDs (0 - main stream, 1 - substream).'
+        - macro: '{$THINGINO.LLD.FILTER.STREAM.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Filter to exclude discovered streams by ID.'
+          config:
+            type: TEXT
+            priority: '16'
+            section_name: Discovery
+            label: 'Streams to exclude'
+            description: 'Regular expression for stream IDs to exclude.'
+        - macro: '{$THINGINO.LOAD.AVG.MAX}'
+          value: '8'
+          description: 'Maximum 5-minute load average.'
+          config:
+            type: TEXT
+            priority: '11'
+            section_name: Thresholds
+            label: 'Maximum load average'
+            regex: '^-?([0-9]+|(([0-9]+)\.([0-9]+)))$'
+        - macro: '{$THINGINO.MEMORY.UTIL.MAX}'
+          value: '90'
+          description: 'Maximum memory utilization in %.'
+          config:
+            type: TEXT
+            priority: '10'
+            section_name: Thresholds
+            label: 'Maximum memory utilization, %'
+            description: 'In the range from 0 to 100 inclusive.'
+            regex: '^-?([0-9]+|(([0-9]+)\.([0-9]+)))$'
+        - macro: '{$THINGINO.NODATA.TIMEOUT}'
+          value: 30m
+          description: 'Period without runtime data for the "No data received" trigger.'
+          config:
+            type: TEXT
+            priority: '7'
+            section_name: Thresholds
+            label: 'No data timeout'
+            regex: '^[0-9]+[smhdw]?$'
+        - macro: '{$THINGINO.OVERLAY.PUSED.MAX.CRIT}'
+          value: '95'
+          description: 'Critical overlay utilization in %.'
+          config:
+            type: TEXT
+            priority: '13'
+            section_name: Thresholds
+            label: 'Overlay utilization, critical %'
+            regex: '^-?([0-9]+|(([0-9]+)\.([0-9]+)))$'
+        - macro: '{$THINGINO.OVERLAY.PUSED.MAX.WARN}'
+          value: '85'
+          description: 'Warning overlay utilization in %.'
+          config:
+            type: TEXT
+            priority: '12'
+            section_name: Thresholds
+            label: 'Overlay utilization, warning %'
+            regex: '^-?([0-9]+|(([0-9]+)\.([0-9]+)))$'
+        - macro: '{$THINGINO.PORT}'
+          value: '443'
+          description: 'Port of the camera web interface (443 for HTTPS, 80 for plain HTTP).'
+          config:
+            type: TEXT
+            priority: '3'
+            label: Port
+            description: 'Web interface port. In the range from 1 to 65535 inclusive.'
+            required: 'YES'
+            regex: '^[0-9]{1,5}$'
+        - macro: '{$THINGINO.RECORDING.INACTIVE.PERIOD}'
+          value: 10m
+          description: 'Period without an active recording (while autostart is on) before a problem is raised.'
+          config:
+            type: TEXT
+            priority: '17'
+            section_name: Thresholds
+            label: 'Recording inactivity period'
+            regex: '^[0-9]+[smhdw]?$'
+        - macro: '{$THINGINO.SCHEME}'
+          value: https
+          description: 'Scheme of the camera web interface: https (default uhttpd build) or http.'
+          config:
+            type: LIST
+            priority: '2'
+            label: Scheme
+            required: 'YES'
+            description: 'The default Thingino web server (uhttpd) serves HTTPS on port 443 and redirects HTTP to HTTPS. Certificates are not verified, so the self-signed camera certificate is accepted.'
+            options:
+              - value: http
+                text: HTTP
+              - value: https
+                text: HTTPS
+        - macro: '{$THINGINO.STORAGE.FREE.MIN}'
+          value: 256M
+          description: 'Minimum free space on a discovered filesystem. Use a context macro for one mount point, e.g. {$THINGINO.STORAGE.FREE.MIN:"/mnt/nfs"}.'
+          config:
+            type: TEXT
+            priority: '14'
+            section_name: Thresholds
+            label: 'Minimum free storage space'
+            description: 'Size with an optional suffix (K, M, G), e.g. 256M.'
+            regex: '^[0-9]+[KMGT]?$'
+        - macro: '{$THINGINO.STREAM.UNHEALTHY.PERIOD}'
+          value: 5m
+          description: 'Period a stream must be unhealthy to raise a problem.'
+          config:
+            type: TEXT
+            priority: '9'
+            section_name: Thresholds
+            label: 'Stream unhealthy period'
+            regex: '^[0-9]+[smhdw]?$'
+        - macro: '{$THINGINO.STREAMER.DOWN.PERIOD}'
+          value: 3m
+          description: 'Period the streamer must be down to raise a problem.'
+          config:
+            type: TEXT
+            priority: '8'
+            section_name: Thresholds
+            label: 'Streamer down period'
+            regex: '^[0-9]+[smhdw]?$'
+        - macro: '{$THINGINO.TIME.DIFF.MAX}'
+          value: 2m
+          description: 'Maximum allowed camera clock difference from the Zabbix server.'
+          config:
+            type: TEXT
+            priority: '18'
+            section_name: Thresholds
+            label: 'Maximum clock difference'
+            regex: '^[0-9]+[smhdw]?$'
+        - macro: '{$THINGINO.UNAVAILABLE.PERIOD}'
+          value: 3m
+          description: 'Period of failed requests before the camera is unreachable.'
+          config:
+            type: TEXT
+            priority: '6'
+            section_name: Thresholds
+            label: 'Unreachable period'
+            regex: '^[0-9]+[smhdw]?$'
+        - macro: '{$THINGINO.VFS.FS.NAME.MATCHES}'
+          value: '.*'
+          description: 'Mount points to discover (regular expression).'
+          config:
+            type: TEXT
+            priority: '19'
+            section_name: Discovery
+            label: 'Mount points to include'
+        - macro: '{$THINGINO.VFS.FS.NAME.NOT_MATCHES}'
+          value: ^(/dev|/sys|/proc|/run|/tmp|/overlay|/rom)($|/)
+          description: 'Mount points to skip (regular expression).'
+          config:
+            type: TEXT
+            priority: '20'
+            section_name: Discovery
+            label: 'Mount points to exclude'
+        - macro: '{$THINGINO.VFS.FS.TYPE.MATCHES}'
+          value: '^(vfat|msdos|exfat|ext[234]|f2fs|btrfs|xfs|ntfs3?|fuseblk|nfs4?|cifs|smb3)$'
+          description: 'Filesystem types to discover (regular expression).'
+          config:
+            type: TEXT
+            priority: '21'
+            section_name: Discovery
+            label: 'Filesystem types to include'
+        - macro: '{$THINGINO.VFS.FS.TYPE.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Filesystem types to skip (regular expression).'
+          config:
+            type: TEXT
+            priority: '22'
+            section_name: Discovery
+            label: 'Filesystem types to exclude'
+      dashboards:
+        - uuid: 9ea2dac808254d2c8d6abee116b9aea3
+          name: 'Thingino camera'
+          pages:
+            - widgets:
+                - type: graph
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'Thingino camera by HTTP'
+                        name: 'Thingino: Memory usage'
+                    - type: STRING
+                      name: reference
+                      value: THMEM
+                - type: graph
+                  x: '36'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'Thingino camera by HTTP'
+                        name: 'Thingino: Load average'
+                    - type: STRING
+                      name: reference
+                      value: THLOA
+                - type: graph
+                  y: '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'Thingino camera by HTTP'
+                        name: 'Thingino: Day/night sensor'
+                    - type: STRING
+                      name: reference
+                      value: THDNS
+                - type: graph
+                  x: '36'
+                  y: '5'
+                  width: '36'
+                  height: '5'
+                  fields:
+                    - type: GRAPH
+                      name: graphid.0
+                      value:
+                        host: 'Thingino camera by HTTP'
+                        name: 'Thingino: Overlay usage'
+                    - type: STRING
+                      name: reference
+                      value: THSTO
+      valuemaps:
+        - uuid: c2aec98b2c1c493388761c6baad5e7ef
+          name: 'Thingino API status'
+          mappings:
+            - value: '0'
+              newvalue: Unreachable
+            - value: '1'
+              newvalue: OK
+            - value: '2'
+              newvalue: 'Authentication failed'
+            - value: '3'
+              newvalue: 'Camera agent error'
+            - value: '4'
+              newvalue: 'Unexpected response'
+            - value: '5'
+              newvalue: 'agent.cgi header bug: patch camera'
+        - uuid: 8a9411f16b374c419e2d781d5561a91b
+          name: 'Thingino color mode'
+          mappings:
+            - value: '0'
+              newvalue: Color
+            - value: '1'
+              newvalue: 'Black & white'
+        - uuid: 60ad8cd9303f4018ba52e60536edb4c6
+          name: 'Thingino day/night mode'
+          mappings:
+            - value: '0'
+              newvalue: Night
+            - value: '1'
+              newvalue: Day
+            - value: '2'
+              newvalue: Unknown
+        - uuid: d39463d3575a45f1be4e8695b30bed24
+          name: 'Thingino health'
+          mappings:
+            - value: '0'
+              newvalue: Unhealthy
+            - value: '1'
+              newvalue: Healthy
+        - uuid: 936352c95a084d5c883b929afaa437aa
+          name: 'Thingino IR-cut filter'
+          mappings:
+            - value: '0'
+              newvalue: 'Removed (night)'
+            - value: '1'
+              newvalue: 'Engaged (day)'
+        - uuid: bb4e16f855d1404a834f14f4e193e5e2
+          name: 'Thingino on/off'
+          mappings:
+            - value: '0'
+              newvalue: 'Off'
+            - value: '1'
+              newvalue: 'On'
+        - uuid: 2779b449f34e4757ab99e242a7d32e9e
+          name: 'Thingino up/down'
+          mappings:
+            - value: '0'
+              newvalue: Down
+            - value: '1'
+              newvalue: Up
+        - uuid: feeb982d6d194261af2fdf0309c87769
+          name: 'Thingino yes/no'
+          mappings:
+            - value: '0'
+              newvalue: 'No'
+            - value: '1'
+              newvalue: 'Yes'
+  triggers:
+    - uuid: a0054c7f4fde4c6dbe2ed291fb8c127c
+      expression: 'last(/Thingino camera by HTTP/thingino.recording.autostart)=1 and last(/Thingino camera by HTTP/thingino.storage.mounted)=0'
+      name: 'Thingino: Recording is enabled, but storage is not mounted'
+      priority: AVERAGE
+      description: 'Continuous recording is configured, but the recording storage (see the "Storage: Mount point" item) is not mounted. Check the SD card or the network share.'
+      manual_close: 'YES'
+      dependencies:
+        - name: 'Thingino: Camera is unreachable'
+          expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+      tags:
+        - tag: scope
+          value: availability
+    - uuid: 25d69738870645fcacfcc9e76548727b
+      expression: 'last(/Thingino camera by HTTP/thingino.recording.autostart)=1 and last(/Thingino camera by HTTP/thingino.storage.mounted)=1 and last(/Thingino camera by HTTP/thingino.storage.writable)=0'
+      name: 'Thingino: Recording storage is not writable'
+      priority: AVERAGE
+      description: 'The recording storage is mounted read-only or is not writable. The filesystem may be corrupted.'
+      manual_close: 'YES'
+      dependencies:
+        - name: 'Thingino: Camera is unreachable'
+          expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+      tags:
+        - tag: scope
+          value: availability
+    - uuid: 01cc720000004d56b499d929d6d520c1
+      expression: 'last(/Thingino camera by HTTP/thingino.recording.autostart)=1 and max(/Thingino camera by HTTP/thingino.recording.active,{$THINGINO.RECORDING.INACTIVE.PERIOD})=0'
+      name: 'Thingino: Continuous recording is not running'
+      event_name: 'Thingino: Continuous recording is not running (for {$THINGINO.RECORDING.INACTIVE.PERIOD})'
+      priority: WARNING
+      description: 'Recording autostart is enabled, but no recording has been active for {$THINGINO.RECORDING.INACTIVE.PERIOD}.'
+      manual_close: 'YES'
+      dependencies:
+        - name: 'Thingino: Camera is unreachable'
+          expression: 'max(/Thingino camera by HTTP/thingino.api.status,{$THINGINO.UNAVAILABLE.PERIOD})=0'
+        - name: 'Thingino: Streamer is not running'
+          expression: 'max(/Thingino camera by HTTP/thingino.streamer.running,{$THINGINO.STREAMER.DOWN.PERIOD})=0'
+        - name: 'Thingino: Recording is enabled, but storage is not mounted'
+          expression: 'last(/Thingino camera by HTTP/thingino.recording.autostart)=1 and last(/Thingino camera by HTTP/thingino.storage.mounted)=0'
+        - name: 'Thingino: Recording storage is not writable'
+          expression: 'last(/Thingino camera by HTTP/thingino.recording.autostart)=1 and last(/Thingino camera by HTTP/thingino.storage.mounted)=1 and last(/Thingino camera by HTTP/thingino.storage.writable)=0'
+      tags:
+        - tag: scope
+          value: availability
+  graphs:
+    - uuid: 219b370f7c1b4f8b96970e552e67ca9b
+      name: 'Thingino: Memory usage'
+      ymin_type_1: FIXED
+      graph_items:
+        - drawtype: GRADIENT_LINE
+          color: 199C0D
+          item:
+            host: 'Thingino camera by HTTP'
+            key: thingino.memory.used
+        - sortorder: '1'
+          color: F63100
+          item:
+            host: 'Thingino camera by HTTP'
+            key: thingino.memory.available
+    - uuid: d955dd35a91047748067f638f190b026
+      name: 'Thingino: Load average'
+      ymin_type_1: FIXED
+      graph_items:
+        - color: 199C0D
+          item:
+            host: 'Thingino camera by HTTP'
+            key: 'thingino.system.load[avg1]'
+        - sortorder: '1'
+          color: 2774A4
+          item:
+            host: 'Thingino camera by HTTP'
+            key: 'thingino.system.load[avg5]'
+        - sortorder: '2'
+          color: F63100
+          item:
+            host: 'Thingino camera by HTTP'
+            key: 'thingino.system.load[avg15]'
+    - uuid: de225dba40944f5db596cd013466fffa
+      name: 'Thingino: Day/night sensor'
+      graph_items:
+        - drawtype: BOLD_LINE
+          color: F7941D
+          item:
+            host: 'Thingino camera by HTTP'
+            key: thingino.daynight.brightness
+        - sortorder: '1'
+          color: 2774A4
+          yaxisside: RIGHT
+          item:
+            host: 'Thingino camera by HTTP'
+            key: thingino.daynight.gain
+    - uuid: df1e7834c9474fea8cb08e46700f1e61
+      name: 'Thingino: Overlay usage'
+      type: STACKED
+      graph_items:
+        - color: F63100
+          item:
+            host: 'Thingino camera by HTTP'
+            key: thingino.overlay.used
+        - sortorder: '1'
+          color: 199C0D
+          item:
+            host: 'Thingino camera by HTTP'
+            key: thingino.overlay.free
