@@ -1,0 +1,1 @@
+# zabbix-8-iot-templates
